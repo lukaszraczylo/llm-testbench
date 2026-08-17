@@ -7,6 +7,15 @@ import (
 
 func registerCodebaseTests(r *testkit.Registry) {
 	r.Register(codeTraceGoTest())
+	r.Register(codeTracePythonTest())
+	r.Register(codeTraceTSTest())
+	r.Register(codeBugLineDiffTest())
+	r.Register(codeRaceVariableTest())
+	r.Register(codeDeadFunctionsTest())
+	r.Register(codeBigODedupTest())
+	r.Register(codeImportCycleTest())
+	r.Register(codeGenericReturnTypeTest())
+	r.Register(codeCommitBisectTest())
 }
 
 // mix is the traced function for codeTraceGoTest: deterministic bit

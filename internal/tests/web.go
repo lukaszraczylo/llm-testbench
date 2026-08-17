@@ -7,6 +7,15 @@ import (
 
 func registerWebTests(r *testkit.Registry) {
 	r.Register(webRobotsAICrawlersTest())
+	r.Register(webHTMLProductExtractTest())
+	r.Register(webHreflangReciprocalTest())
+	r.Register(webURLParseComponentsTest())
+	r.Register(webSitemapMaxURLsTest())
+	r.Register(webHTTPStatusScenariosTest())
+	r.Register(webDNSMXRecordTest())
+	r.Register(webCanonicalVsRedirectTest())
+	r.Register(webCORSMissingHeaderTest())
+	r.Register(webSecurityHeadersAuditTest())
 }
 
 // webRobotsAICrawlersRobotsTxt is the inline robots.txt for
