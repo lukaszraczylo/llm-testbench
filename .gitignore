@@ -1,0 +1,12 @@
+# Binaries
+/llmtest
+/bin/
+*.exe
+*.test
+
+# Local config (copy config.example.yaml -> config.yaml and edit)
+/config.yaml
+
+# OS/editor cruft
+.DS_Store
+*.swp

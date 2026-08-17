@@ -1,0 +1,9 @@
+endpoint: https://llm-gateway.example.com/v1
+api_key: ""            # optional; env LLMTB_API_KEY wins
+models:
+  - uni/deepseek-v4-flash-0731
+  - uni/qwen3.6-27b
+  - uni/btl-4
+concurrency: 4
+request_timeout: 120s
+max_tokens_default: 4000

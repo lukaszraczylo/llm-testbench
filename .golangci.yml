@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - gosec
+  settings:
+    govet:
+      enable:
+        - fieldalignment
+    gosec:
+      # Keep gosec's default rule set; false positives are annotated inline
+      # with "#nosec Gxxx -- reason" at the flagged line (see config.go,
+      # internal/eval/exec.go, internal/tests/c_test.go) rather than
+      # globally excluded here.
+      excludes: []
+
+issues:
+  # Exec evaluators (internal/eval/exec.go) legitimately build and run
+  # go/python3/cc commands against model-generated source under a locked-down
+  # temp dir + minimal env allowlist (see minimalExecEnv); that is flagged by
+  # gosec G204 by design and is annotated at each call site, not excluded
+  # here.
+  max-issues-per-linter: 0
+  max-same-issues: 0
