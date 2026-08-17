@@ -174,3 +174,99 @@ verify vs trust (JSON); batch related fixes vs separate dispatches (JSON); main-
 decision for a quick edit (JSON); reviewer independence — same agent must not verify its own work
 (JSON); escalation to human criteria (JSON); parallel dispatch safety — shared-file conflict spot
 (JSON); minimal-privilege agent choice (JSON).
+
+---
+
+# Round 2 — four new categories (databases, security, delivery, ai)
+
+Same non-negotiable authoring rules as above. Every subcategory gets 10 tests.
+New-category authors create ONLY new files (`databases*.go`, `security*.go`,
+`delivery*.go`, `ai*.go` + `_test.go` siblings) — do NOT touch `catalog.go` or
+`catalog_test.go`; the orchestrator wires register calls at integration. Verify
+your registrations with a wiring test that calls your register function directly
+(see `agents_test.go` TestRegisterAgentsTests_Wiring for the pattern). Prefix
+helpers: `db`/`sec`/`del`/`ai`.
+
+### databases/postgres
+EXPLAIN plan interpretation (inline plan → JSON seq-vs-index + reason); index choice for inline
+query+schema (JSON); N+1 detection in inline code (JSON); isolation anomaly naming for an inline
+schedule (exact); deadlock from two inline transactions (JSON lock order); replica failover
+behaviour question (contains); bloat/VACUUM diagnosis from inline pg_stat fixture (JSON);
+pool sizing from formula (numeric); partial index applicability (JSON); LISTEN/NOTIFY vs polling
+scenario (exact).
+
+### databases/redis
+Structure choice for 4 scenarios (JSON map); TTL+eviction policy behaviour (exact); INCR
+atomicity vs GET/SET race (JSON); MULTI vs pipeline semantics (exact); SCAN vs KEYS in prod
+(negation-aware contains); pub/sub delivery guarantees (exact); Lua script atomicity (exact);
+memory estimate of inline dataset (numeric); cache stampede mitigation (JSON); keyspace design
+anti-pattern spot (JSON).
+
+### databases/sql-tuning
+All trace-style where possible — give inline table rows, ask query results: aggregate query
+result (numeric); JOIN type row counts (numeric); NULL in WHERE row count (numeric); GROUP BY +
+HAVING output (JSON); window function output (JSON); composite index column order for inline
+query (JSON array); keyset vs OFFSET pagination (exact); covering index question (exact);
+equivalent-rewrite multiple choice (JSON); ORDER BY index serving (JSON).
+
+### security/appsec
+Line-spot style on inline code: SQLi (JSON line+fix keyword); XSS sink (JSON); path traversal
+(JSON); SSRF (JSON); IDOR/authz gap (JSON); open redirect (JSON line); CSRF requirement scenario
+(exact); rate-limit placement (JSON); input validation boundary (contains); secret-in-log spot
+(JSON line).
+
+### security/crypto
+Password hashing bcrypt/argon2 vs SHA (negation-aware contains); constant-time compare
+(contains hmac.Equal/subtle); JWT alg=none pitfall (JSON); TLS floor version (exact); AES-GCM
+nonce reuse consequence (contains); crypto/rand vs math/rand (negation-aware contains); key
+rotation ordering (JSON array); HMAC vs asymmetric signature choice (exact); cert chain
+validation question (exact); hash vs encrypt for PII (JSON).
+
+### security/secrets
+Hardcoded secret spot (JSON line); committed-secret remediation ordering — rotate THEN rewrite
+history (JSON array); vault/sealed-secrets/env tradeoff (JSON); k8s Secret base64 ≠ encryption
+(exact); rotation without downtime ordering (JSON array); least-privilege key scoping (JSON);
+secret in inline diff spot (JSON); fork-PR CI secret exposure (exact); SSH agent (1Password-style
+IdentityAgent) handling (contains); .gitignore-vs-history nuance (exact).
+
+### delivery/git
+bisect step count for N commits (numeric, log2 derivation); rebase vs merge scenario (exact);
+conventional-commit classification set (JSON); worktree use case (contains); force-with-lease
+vs force (negation-aware contains); hook choice for a policy (exact pre-commit/pre-push/
+commit-msg); detached HEAD recovery (JSON array); cherry-pick vs revert (exact); .gitignore
+negation trace on inline tree (JSON: ignored files); stash pop conflict behaviour (exact).
+
+### delivery/containers
+Layer-cache bust spot in inline Dockerfile (JSON line); ENTRYPOINT+CMD interaction trace
+(exact command line); multi-stage size benefit (contains); image size math (numeric); non-root
+USER + capabilities (contains); HEALTHCHECK semantics (exact); .dockerignore effect (JSON);
+COPY vs ADD (exact); build-arg vs runtime env (JSON); layer count of inline Dockerfile (numeric).
+
+### delivery/release-engineering
+semver bump from inline changelog (JSON); release tooling requires clean tree — why (contains);
+rollback ordering (JSON array); canary vs blue-green choice (exact); tag → GitHub release
+sequence (JSON array); commit-to-changelog section mapping (JSON); checksums/signing purpose
+(contains); pipeline stage ordering (JSON array); pin vs range dependency policy (exact);
+hotfix flow ordering (JSON array).
+
+### ai/vector-search
+cosine vs dot for normalized vectors (exact); recall@k on inline result lists (numeric, fresh
+fixture); HNSW efSearch tradeoff direction (exact); PQ memory math (numeric, different params
+from whitepapers test); pre- vs post-filtering ANN (exact); RRF hybrid fusion computation
+(numeric on inline ranks); distance→similarity conversion (numeric); near-duplicate threshold
+reasoning (numeric); index build/query tradeoff (JSON); embedding dimension tradeoff (JSON).
+
+### ai/llm-integration
+OpenAI-compatible field semantics (JSON: temperature/max_tokens/stop behaviour); token budget
+math for reasoning models — completion budget vs answer size (numeric; ground in this very
+framework's truncation incident); 429 retry/backoff policy (JSON); context overflow strategy
+(JSON); tool-call response handling trace (JSON); system vs user role placement (exact);
+temperature=0 determinism caveat (contains); SSE stream event parsing (exact); embedding batch
+efficiency math (numeric); stop-sequence behaviour trace (exact).
+
+### ai/rag
+Chunk size tradeoff (JSON); reranker placement in pipeline (JSON array); retrieval failure
+mode keyword-vs-semantic for an inline query/corpus (exact); citation grounding requirement
+(contains); context selection vs stuffing (exact); index staleness on doc update (JSON);
+RAG eval metric choice (JSON); hallucination mitigation ordering (JSON array); multi-hop
+decomposition of an inline question (JSON array); pre-assembly dedup rationale (contains).
