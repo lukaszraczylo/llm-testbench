@@ -1,7 +1,11 @@
 package tests
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
@@ -29,6 +33,36 @@ func registerDeliveryReleaseTests(r *testkit.Registry) {
 // parameter - a minor-level change under Semantic Versioning. The highest
 // severity present (feat) determines the bump: v2.3.1 with a minor bump
 // becomes 2.4.0 (MINOR increments, PATCH resets to 0).
+// delRelVersionWant is the correct next-version string for
+// delRelSemverBumpChangelogTest.
+const delRelVersionWant = "2.4.0"
+
+// delRelVersionEval scores full credit when the response's JSON "version"
+// field equals delRelVersionWant, tolerant of an optional leading "v"/"V"
+// prefix (DC3): the prompt's own last-release version is v-prefixed
+// ("v2.3.1"), so a model that mirrors that same convention in its answer
+// ("v2.4.0") is not wrong, just differently formatted.
+func delRelVersionEval() eval.Evaluator {
+	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
+		raw, err := eval.ExtractJSON(response)
+		if err != nil {
+			return eval.Score{Value: 0, Detail: err.Error()}
+		}
+		var parsed struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			return eval.Score{Value: 0, Detail: fmt.Sprintf("invalid JSON: %v", err)}
+		}
+		got := strings.TrimSpace(parsed.Version)
+		got = strings.TrimPrefix(strings.TrimPrefix(got, "v"), "V")
+		if strings.EqualFold(got, delRelVersionWant) {
+			return eval.Score{Value: 1, Detail: fmt.Sprintf("version = %s", got)}
+		}
+		return eval.Score{Value: 0, Detail: fmt.Sprintf("version: got %q, want %q (optional leading v)", parsed.Version, delRelVersionWant)}
+	})
+}
+
 func delRelSemverBumpChangelogTest() testkit.Test {
 	prompt := `Since the last release v2.3.1, these changes have merged:
 
@@ -47,7 +81,7 @@ Respond with only a JSON object: {"version":"X.Y.Z"}`
 		Subcategory: "release-engineering",
 		Description: "Derive the next semver version (minor bump to 2.4.0) from a merged-change list dominated by one backward-compatible feat.",
 		Prompt:      prompt,
-		Eval:        eval.JSONField("version", "2.4.0"),
+		Eval:        delRelVersionEval(),
 	}
 }
 
@@ -81,7 +115,7 @@ silently modify tracked files this way.`
 
 	evaluator := eval.All(
 		eval.W(eval.ContainsAny("clean tree", "clean working tree", "clean git tree", "uncommitted", "dirty"), 2),
-		eval.W(delNoUnnegatedMention(delRelSilentlyModifyPattern, "no unsafe recommendation to silently modify tracked files"), 2),
+		eval.W(delNoUnnegatedMention(delRelSilentlyModifyPattern), 2),
 	)
 
 	return testkit.Test{
@@ -115,12 +149,19 @@ var delRelRollbackOrderingWant = []string{
 // delRelRollbackOrderingTest: order the steps of a production rollback
 // after a failed deploy.
 func delRelRollbackOrderingTest() testkit.Test {
+	// D7: the added clause rules out a reading where stopping new traffic
+	// (or any other mitigating action) could come before paging on-call -
+	// the response must be coordinated from the start, not a solo action
+	// taken before anyone else is even aware of the incident.
 	prompt := `Release v3.1.0 was just deployed and is now failing health
 checks in production. The previous release v3.0.4 was healthy. Give the
 ordered list of steps to safely roll back to the last known-good release,
 choosing from and ordering exactly these labels:
 ["redeploy-previous-image", "page-oncall", "confirm-health-checks-pass",
 "stop-new-traffic-if-needed", "post-incident-notes"]
+
+The on-call rotation must be engaged before any mitigating action is
+taken, so the response stays coordinated from the start.
 
 Respond with only a JSON array of the labels, in the order you would
 perform them.`
@@ -197,12 +238,19 @@ var delRelTagToReleaseWant = []string{
 // delRelTagToReleaseSequenceTest: order the steps from a verified main
 // branch to a published, announced GitHub release.
 func delRelTagToReleaseSequenceTest() testkit.Test {
+	// D7: the added clause disambiguates that the changelog is generated
+	// FROM the pushed tag (the goreleaser/gh-release flow this test
+	// models), ruling out generating it before the tag is pushed.
 	prompt := `Starting from an already-merged, untested-since-merge main
 branch, give the ordered sequence of steps to reach a published,
 announced GitHub release with generated release notes, choosing from and
 ordering exactly these labels:
 ["run-tests", "create-git-tag", "push-tag", "generate-changelog",
 "create-github-release", "announce"]
+
+The changelog is generated from the pushed tag by the release tool (it
+reads the git log since the previous tag, so the tag must already be
+pushed before it can run).
 
 Respond with only a JSON array of the labels, in the order you would
 perform them.`
@@ -273,9 +321,12 @@ cosign key. In 1-2 sentences, explain what problem each of these two things
 solves for someone downloading the release: the checksums file, and the
 signature over it.`
 
+	// D8: "identity" is too generic (could describe many unrelated
+	// things) - replaced with the more specific authentic/provenance/
+	// signed-by/publisher terms, keeping the other pre-existing phrasings.
 	evaluator := eval.All(
 		eval.W(eval.ContainsAny("integrity", "corrupt", "tamper", "not been altered", "not been modified"), 2),
-		eval.W(eval.ContainsAny("authentic", "provenance", "came from", "verify the publisher", "signed by", "identity"), 2),
+		eval.W(eval.ContainsAny("authentic", "provenance", "came from", "verify the publisher", "signed by", "publisher"), 2),
 	)
 
 	return testkit.Test{

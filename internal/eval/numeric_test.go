@@ -29,6 +29,14 @@ func TestExtractLastNumber(t *testing.T) {
 		{"multiplier suffix accepted", "The compression ratio is 64x.", 64, false},
 		{"multiplier suffix at end of text", "speedup: 8x", 8, false},
 		{"hex literal never a multiplier", "the flag is 0x2A so the answer is 42", 42, false},
+		// DC1: glued byte-size unit suffixes (kb/mb/gb/tb) extract the
+		// same as a multiplier suffix.
+		{"glued MB unit suffix", "The final image is 30MB.", 30, false},
+		{"glued lowercase mb unit suffix", "total: 30mb", 30, false},
+		{"glued GB unit suffix", "Budget: 60GB", 60, false},
+		{"glued KB unit suffix", "Size: 512KB", 512, false},
+		{"glued TB unit suffix", "Capacity: 4TB", 4, false},
+		{"plural unit suffix still rejected as an identifier", "roughly 300MBs of headroom, so the answer is 300", 300, false},
 		{"hyphen-compound number accepted as a last resort", "It is a 24-byte struct.", 24, false},
 		// Documented limitation, not a regression: the heuristic has no
 		// notion of "the total" vs. "a breakdown component" and returns

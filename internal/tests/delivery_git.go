@@ -2,8 +2,8 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"regexp"
-	"strings"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
@@ -23,66 +23,22 @@ func registerDeliveryGitTests(r *testkit.Registry) {
 }
 
 // --- negation-aware helpers, shared across delivery_git.go and
-// delivery_release.go (same package). Duplicated in spirit from
-// operations/kubernetes's noLiveKubectlMutation/negationCuePattern rather
-// than imported from kubernetes.go, so this category's files stay
-// self-contained: round-2 authors work in isolated worktrees on
-// databases/security/delivery/ai in parallel, and depending on another
-// category's unexported symbols would create a merge-time coupling this
-// worktree cannot see or coordinate on. ---
+// delivery_release.go (same package), delegating to eval.NoUnnegatedMention
+// (D5) - the primitive unifying this file's, kubernetes.go's, security.go's,
+// and databases_redis.go's four independently-written equivalents. ---
 
-// delNegationCuePattern matches a word that turns a mention of a forbidden
-// phrase into a warning against doing it, rather than an instruction to do
-// it (e.g. "never use bare --force", "must not silently modify").
-var delNegationCuePattern = regexp.MustCompile(`(?i)\b(don'?t|do not|never|avoid|instead of|not|cannot|can'?t|rather than|without|no need|must not|should not|shouldn'?t)\b`)
-
-// delNegationWindow is how many characters before a forbidden-phrase match
+// delNegationWindow is how many characters around a forbidden-phrase match
 // are searched for a negation cue.
 const delNegationWindow = 60
 
-// delNegationWindowStart returns the earliest byte offset in response to
-// search for a negation cue before a forbidden-phrase match starting at
-// start. The window is the current line, extended back to the start of the
-// immediately preceding line when that line is non-empty, so a hard-wrapped
-// sentence whose negation cue landed on the line above still counts. Either
-// way the window never reaches more than delNegationWindow characters
-// before start.
-func delNegationWindowStart(response string, start int) int {
-	curLineStart := strings.LastIndexByte(response[:start], '\n') + 1
-
-	windowFloor := curLineStart
-	if curLineStart > 0 {
-		prevLineEnd := curLineStart - 1
-		prevLineStart := strings.LastIndexByte(response[:prevLineEnd], '\n') + 1
-		if strings.TrimSpace(response[prevLineStart:prevLineEnd]) != "" {
-			windowFloor = prevLineStart
-		}
-	}
-
-	return max(start-delNegationWindow, windowFloor)
-}
-
 // delNoUnnegatedMention returns an Evaluator scoring full credit unless
-// forbidden matches response at some position with no negation cue in the
-// preceding window - i.e. the response recommends the forbidden thing
-// outright rather than warning against it. This is deliberately not
-// eval.NotContains, which would also zero out the best possible answer (one
-// that correctly explains why NOT to do the forbidden thing).
-func delNoUnnegatedMention(forbidden *regexp.Regexp, safeDetail string) eval.Evaluator {
-	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
-		matches := forbidden.FindAllStringIndex(response, -1)
-		if len(matches) == 0 {
-			return eval.Score{Value: 1, Detail: "no forbidden mention: " + safeDetail}
-		}
-		for _, loc := range matches {
-			start := loc[0]
-			windowStart := delNegationWindowStart(response, start)
-			if !delNegationCuePattern.MatchString(response[windowStart:start]) {
-				return eval.Score{Value: 0, Detail: "unnegated forbidden mention"}
-			}
-		}
-		return eval.Score{Value: 1, Detail: "every forbidden mention is negated"}
-	})
+// forbidden matches response at some position with no negation cue nearby -
+// i.e. the response recommends the forbidden thing outright rather than
+// warning against it. This is deliberately not eval.NotContains, which
+// would also zero out the best possible answer (one that correctly
+// explains why NOT to do the forbidden thing).
+func delNoUnnegatedMention(forbidden *regexp.Regexp) eval.Evaluator {
+	return eval.NoUnnegatedMention(forbidden, delNegationWindow, nil)
 }
 
 // delForceFlagPattern matches every "--force" mention. delForceWithLeaseSuffixPattern
@@ -99,23 +55,7 @@ var delForceWithLeaseSuffixPattern = regexp.MustCompile(`(?i)^-with-lease`)
 // it always scores full credit; a response that recommends bare --force
 // outright scores zero.
 func delNoBareForcePush() eval.Evaluator {
-	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
-		matches := delForceFlagPattern.FindAllStringIndex(response, -1)
-		if len(matches) == 0 {
-			return eval.Score{Value: 1, Detail: "no --force mention"}
-		}
-		for _, loc := range matches {
-			start, end := loc[0], loc[1]
-			if delForceWithLeaseSuffixPattern.MatchString(response[end:]) {
-				continue // "--force-with-lease": the safe form, not bare force
-			}
-			windowStart := delNegationWindowStart(response, start)
-			if !delNegationCuePattern.MatchString(response[windowStart:start]) {
-				return eval.Score{Value: 0, Detail: "unnegated bare --force mention"}
-			}
-		}
-		return eval.Score{Value: 1, Detail: "every bare --force mention is negated or absent"}
-	})
+	return eval.NoUnnegatedMention(delForceFlagPattern, delNegationWindow, delForceWithLeaseSuffixPattern)
 }
 
 // delGitBisectCommitCount is the number of candidate commits between the
@@ -132,6 +72,13 @@ const delGitBisectCommitCount = 137
 // ceil(log2(N)): 2^7 = 128 < 137 <= 256 = 2^8, so ceil(log2(137)) = 8.
 // delivery_git_test.go recomputes this with math.Ceil(math.Log2(137))
 // rather than trusting the hardcoded literal alone.
+//
+// DC7: git's own interactive CLI, when you run `git bisect start`, prints
+// a "roughly N steps" hint computed differently (closer to floor(log2(N)),
+// giving "roughly 7 steps" for 137 candidates here) - a typical-case
+// estimate, not a guaranteed upper bound. The prompt deliberately asks for
+// the "maximum number of steps needed" to disambiguate that it wants the
+// true worst case (8), not git's own displayed estimate (7).
 var delGitBisectStepsWant = 8
 
 // delGitBisectStepsTest: derive the worst-case number of `git bisect`
@@ -209,6 +156,13 @@ commit6: "test(exec): add toolchain-missing skip cases for GoRun/PyRun/CRun"`
 
 // delGitConventionalCommitClassifyTest: classify 6 commit messages, one per
 // standard conventional-commit type, by their type prefix.
+//
+// ground truth (DC9): each commit message's own prefix names its
+// Conventional Commits type directly - commit1="feat(...)" -> feat,
+// commit2="fix(...)" -> fix, commit3="chore(...)" -> chore,
+// commit4="docs: ..." -> docs, commit5="refactor(...)" -> refactor,
+// commit6="test(...)" -> test. No inference beyond reading the stated
+// prefix is required.
 func delGitConventionalCommitClassifyTest() testkit.Test {
 	prompt := `Here are 6 commit messages from a project using Conventional
 Commits:
@@ -319,7 +273,7 @@ with only the hook name.`
 		Subcategory: "git",
 		Description: "Pick commit-msg as the hook that enforces a commit message format at commit time.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("commit-msg"),
+		Eval:        eval.ExactToken("commit-msg"),
 	}
 }
 
@@ -333,6 +287,34 @@ with only the hook name.`
 // Reversing the order (checkout first) would move HEAD away from the
 // detached commits before a branch ref exists to save them, losing the
 // work to garbage collection.
+// delGitDetachedHeadRecoveryWant lists every accepted git-subcommand-array
+// answer for delGitDetachedHeadRecoveryTest (D6): the two-step "branch" then
+// "checkout" sequence from the ground truth above, or either of the two
+// single, atomic commands that create the branch and switch onto it in one
+// step - "git checkout -b <name>" (named here by its subcommand alone,
+// "checkout") or the newer "git switch -c <name>" ("switch"). Both
+// single-command forms are equally safe: HEAD never sits in an
+// unprotected, still-detached state between two separate commands.
+var delGitDetachedHeadRecoveryWant = [][]string{
+	{"branch", "checkout"},
+	{"checkout"},
+	{"switch"},
+}
+
+// delGitDetachedHeadRecoveryEval scores full credit when the response's
+// JSON string array exactly matches any one of
+// delGitDetachedHeadRecoveryWant's accepted sequences (D6).
+func delGitDetachedHeadRecoveryEval() eval.Evaluator {
+	return eval.EvaluatorFunc(func(ctx context.Context, response string) eval.Score {
+		for _, want := range delGitDetachedHeadRecoveryWant {
+			if eval.JSONStringArrayEquals(want).Evaluate(ctx, response).Value == 1 {
+				return eval.Score{Value: 1, Detail: fmt.Sprintf("matches accepted sequence %v", want)}
+			}
+		}
+		return eval.Score{Value: 0, Detail: fmt.Sprintf("does not match any accepted sequence %v", delGitDetachedHeadRecoveryWant)}
+	})
+}
+
 func delGitDetachedHeadRecoveryTest() testkit.Test {
 	prompt := `You ran "git checkout <old-commit-sha>" directly (not a
 branch name), then made 3 new commits while HEAD was detached. You only now
@@ -346,9 +328,9 @@ losing them. Respond with only a JSON array of subcommand names, e.g.
 		ID:          "git-detached-head-recovery",
 		Category:    "delivery",
 		Subcategory: "git",
-		Description: "Order git branch then git checkout to save 3 detached-HEAD commits onto a new branch.",
+		Description: "Order git branch then git checkout to save 3 detached-HEAD commits onto a new branch (or the single-command checkout -b / switch -c equivalent).",
 		Prompt:      prompt,
-		Eval:        eval.JSONStringArrayEquals([]string{"branch", "checkout"}),
+		Eval:        delGitDetachedHeadRecoveryEval(),
 	}
 }
 
@@ -374,7 +356,7 @@ Respond with only one word: cherry-pick or revert.`
 		Subcategory: "git",
 		Description: "Pick git revert (not cherry-pick) to undo an already-shared commit without rewriting history.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("revert"),
+		Eval:        eval.ExactToken("revert"),
 	}
 }
 
@@ -471,6 +453,6 @@ dropped or kept.`
 		Subcategory: "git",
 		Description: "State that a conflicting git stash pop keeps the stash entry rather than dropping it.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("kept"),
+		Eval:        eval.ExactToken("kept"),
 	}
 }

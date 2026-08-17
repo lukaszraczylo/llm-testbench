@@ -11,10 +11,10 @@ import (
 // 10 tests each, all categorized "delivery", and no duplicate IDs across the
 // three sibling files (testkit.Registry.Register panics on a duplicate ID,
 // which would fail this test outright). Mirrors
-// TestRegisterAgentsTests_Wiring in agents_test.go; catalog.go and
-// catalog_test.go are not touched by this worktree, so this is the only
-// place registerDeliveryTests is exercised until the orchestrator wires it
-// into All() at integration.
+// TestRegisterAgentsTests_Wiring in agents_test.go; catalog.go's All() now
+// also wires registerDeliveryTests directly (DC8), but this test still
+// exercises the registration function in isolation from the other
+// categories.
 func TestRegisterDeliveryTests_Wiring(t *testing.T) {
 	r := testkit.NewRegistry()
 	registerDeliveryTests(r)
@@ -38,8 +38,8 @@ func TestRegisterDeliveryTests_Wiring(t *testing.T) {
 		if tc.Description == "" {
 			t.Errorf("test %q: Description is empty", tc.ID)
 		}
-		if tc.MaxTokens < 0 {
-			t.Errorf("test %q: MaxTokens = %d, want >= 0", tc.ID, tc.MaxTokens)
+		if tc.MaxTokens != 0 {
+			t.Errorf("test %q: MaxTokens = %d, want 0 (omitted, per round-2 rule 7)", tc.ID, tc.MaxTokens)
 		}
 		counts[tc.Subcategory]++
 	}

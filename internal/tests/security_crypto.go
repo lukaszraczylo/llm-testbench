@@ -1,7 +1,10 @@
 package tests
 
 import (
+	"context"
+	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
@@ -25,6 +28,27 @@ func registerSecurityCryptoTests(r *testkit.Registry) {
 // directly for password storage because they lack a tunable work factor.
 var secWeakPasswordHashPattern = regexp.MustCompile(`(?i)\b(md5|sha-?1|sha-?256|sha-?512)\b`)
 
+// secWeakHashNamedAndNegated scores full credit only when the response BOTH
+// safely negates every mention of a weak/fast general-purpose hash (or
+// never mentions one) AND actually names at least one of them by name
+// (md5/sha-1/sha-256/sha-512) - C11's fix folded into a single AND rather
+// than an independent extra ContainsAny term, so a wrong answer that
+// recommends SHA-256 outright cannot earn partial credit merely for having
+// typed "SHA-256" while doing so.
+func secWeakHashNamedAndNegated() eval.Evaluator {
+	named := eval.ContainsAny("md5", "sha-1", "sha1", "sha-256", "sha256")
+	negated := secNoUnnegatedMention(secWeakPasswordHashPattern)
+	return eval.EvaluatorFunc(func(ctx context.Context, response string) eval.Score {
+		if n := negated.Evaluate(ctx, response); n.Value != 1 {
+			return eval.Score{Value: 0, Detail: "unnegated mention of a discouraged hash: " + n.Detail}
+		}
+		if m := named.Evaluate(ctx, response); m.Value != 1 {
+			return eval.Score{Value: 0, Detail: "never names a weak hash by name"}
+		}
+		return eval.Score{Value: 1, Detail: "a weak hash is named and every mention is safely negated"}
+	})
+}
+
 // secPasswordHashChoiceTest: recommend bcrypt/argon2 for password storage
 // while not being penalized for correctly warning against SHA/MD5.
 //
@@ -40,9 +64,19 @@ func secPasswordHashChoiceTest() testkit.Test {
 hashing approach should be used to store user passwords at rest, and which
 common hash functions must never be used for this specific purpose?`
 
+	// C11: secNoUnnegatedMention alone scores full credit for a response
+	// that never names any weak hash at all ("no mention" is vacuously
+	// negation-safe), which rewards skipping the prompt's second half
+	// entirely ("which common hash functions must never be used"). A
+	// combined (not independent) second term additionally requires the
+	// response to actually name at least one weak hash BY NAME while ALSO
+	// safely negating it - folded into one AND, not a bare extra
+	// ContainsAny term, since an independent term would give partial credit
+	// to a wrong answer merely for mentioning "SHA-256" while recommending
+	// it (as opposed to warning against it).
 	evaluator := eval.Mean(
 		eval.ContainsAny("bcrypt", "argon2"),
-		secNoUnnegatedMention(secWeakPasswordHashPattern),
+		secWeakHashNamedAndNegated(),
 	)
 
 	return testkit.Test{
@@ -73,9 +107,14 @@ using Go's == operator on the two byte slices.
 Name the security defect this introduces, and the correct Go API to use
 instead of ==.`
 
+	// CC1: "constant-time"/"constant time" describes the FIX (a
+	// constant-time comparison), not the defect itself, so it belongs in
+	// the fix group rather than the defect-naming group - a response that
+	// only ever says "constant-time" never actually names the timing-attack
+	// defect the prompt asks for.
 	evaluator := eval.Mean(
-		eval.ContainsAny("timing attack", "timing side channel", "time-based", "constant-time", "constant time"),
-		eval.ContainsAny("hmac.equal", "subtle.constanttimecompare", "constanttimecompare"),
+		eval.ContainsAny("timing attack", "timing side channel", "time-based"),
+		eval.ContainsAny("hmac.equal", "subtle.constanttimecompare", "constanttimecompare", "constant-time", "constant time"),
 	)
 
 	return testkit.Test{
@@ -122,9 +161,35 @@ Respond with only a JSON object:
 	}
 }
 
-// secTLSFloorPattern requires the digits 1.2 as a standalone version
-// number, tolerant of a leading "TLS"/"TLSv" and surrounding punctuation.
-const secTLSFloorPattern = `\b1\.2\b`
+// secTLSFloorPrefixPattern strips an optional "TLS"/"TLSv" prefix (with or
+// without a separating space) from the front of the normalized response
+// before comparing what remains to the exact literal "1.2" (C1).
+//
+// A plain `\b1\.2\b` substring search had two independent failure modes:
+// "TLSv1.2" (no space) has no word boundary between "v" and "1" - both are
+// \w characters - so it never matched an otherwise-correct compact answer;
+// and a longer response like "TLS 1.3 only; 1.2 is legacy" contains "1.2"
+// as a substring (inside the "legacy" clause) and was wrongly accepted even
+// though 1.3, not 1.2, was the actual chosen floor. Stripping the prefix
+// and then requiring the ENTIRE normalized response to equal "1.2" fixes
+// both: "TLSv1.2" reduces to "1.2" and matches, while the longer sentence
+// never reduces to the bare literal and correctly fails.
+var secTLSFloorPrefixPattern = regexp.MustCompile(`(?i)^tlsv?\s*`)
+
+// secTLSFloorVersionEval normalizes the response (fences/quotes/asterisks/
+// trailing period stripped via eval.NormalizeExactToken), strips a leading
+// TLS/TLSv prefix, and requires the remaining text to equal exactly "1.2".
+func secTLSFloorVersionEval() eval.Evaluator {
+	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
+		got := eval.NormalizeExactToken(response)
+		got = secTLSFloorPrefixPattern.ReplaceAllString(got, "")
+		got = strings.TrimSpace(got)
+		if got == "1.2" {
+			return eval.Score{Value: 1, Detail: "equals 1.2"}
+		}
+		return eval.Score{Value: 0, Detail: fmt.Sprintf("got %q, want \"1.2\"", got)}
+	})
+}
 
 // secTLSFloorVersionTest: name the minimum TLS protocol version that
 // excludes SSLv3/TLS 1.0/1.1 while remaining broadly compatible.
@@ -148,7 +213,7 @@ to accept? Respond with only the version number, e.g. 1.2.`
 		Subcategory: "crypto",
 		Description: "Name TLS 1.2 as the minimum floor that excludes SSLv3/TLS 1.0/1.1 while staying broadly compatible.",
 		Prompt:      prompt,
-		Eval:        eval.Regex(secTLSFloorPattern),
+		Eval:        secTLSFloorVersionEval(),
 	}
 }
 
@@ -170,8 +235,13 @@ the API.
 What is the concrete security consequence of reusing a GCM nonce with the
 same key, and what is the fix?`
 
+	// CC2: bare "authentication" is too generic - a response could mention
+	// authentication in some unrelated sense and get credit without
+	// actually describing the nonce-reuse consequence. Tightened to the
+	// specific consequence terms: forge/forgery, keystream, or the GCM
+	// "auth tag" reuse mechanism itself.
 	evaluator := eval.Mean(
-		eval.ContainsAny("forge", "forgery", "authentication", "keystream", "xor", "plaintext recovery", "break confidentiality"),
+		eval.ContainsAny("forge", "forgery", "auth tag", "authentication tag", "keystream", "xor", "plaintext recovery", "break confidentiality"),
 		eval.ContainsAny("random nonce", "unique nonce", "fresh nonce", "never reuse", "crypto/rand"),
 	)
 
@@ -204,9 +274,8 @@ math/rand to produce 32 random bytes, then hex-encodes them for the reset
 link.
 
 Which Go standard-library package should be used instead of math/rand for
-this purpose, and confirm: math/rand must never be used to generate a
-security-sensitive token like this one. Explain the one concrete risk of
-the current approach.`
+this purpose? Explain the one concrete risk of using math/rand for a
+security-sensitive token like this one.`
 
 	evaluator := eval.Mean(
 		eval.ContainsAny("crypto/rand"),
@@ -249,8 +318,8 @@ issued under the old key and is still within its validity window, and it
 must never allow a window where a still-valid token fails verification.
 
 Order these 4 steps correctly:
-["add-new-key-to-verify-set", "start-signing-with-new-key",
-"wait-for-old-tokens-to-expire", "remove-old-key-from-verify-set"]
+["remove-old-key-from-verify-set", "add-new-key-to-verify-set",
+"wait-for-old-tokens-to-expire", "start-signing-with-new-key"]
 
 Respond with only a JSON array containing all 4 step ids in the correct
 order.`
@@ -290,13 +359,18 @@ Should they use a shared-secret HMAC or an asymmetric signature scheme
 		Subcategory: "crypto",
 		Description: "Choose asymmetric signing over shared-secret HMAC for cross-organization webhook verification.",
 		Prompt:      prompt,
-		Eval:        secExactAnswer("asymmetric"),
+		Eval:        eval.ExactToken("asymmetric"),
 	}
 }
 
-// secManInTheMiddlePattern accepts the standard term for the attack with
-// or without hyphens/spaces between the words.
-const secManInTheMiddlePattern = `(?i)man[\s-]?in[\s-]?the[\s-]?middle`
+// secManInTheMiddlePattern accepts every standard name for this attack
+// class (C6): the classic "man-in-the-middle" phrase (hyphenated, spaced,
+// or run together), its "MITM" abbreviation, the newer gender-neutral
+// "adversary-in-the-middle"/"machine-in-the-middle"/"person-in-the-middle"
+// phrasings and their "AiTM" abbreviation, and "on-path" (the more recent
+// vendor-neutral term some standards bodies now prefer for the same
+// network position).
+const secManInTheMiddlePattern = `(?i)\bmitm\b|\baitm\b|on[\s-]?path\b|(?:man|machine|adversary|person)[\s-]?in[\s-]?the[\s-]?middle`
 
 // secCertChainValidationTest: name man-in-the-middle as the attack exposed
 // by skipping certificate-chain verification.

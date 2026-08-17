@@ -18,6 +18,19 @@ func TestDelRelSemverBumpChangelogTest_Eval(t *testing.T) {
 		{name: "extra whitespace inside the object", response: `{ "version" : "2.4.0" }`, want: 1},
 		{name: "wrong: treats the fix as dominant, only patch bump", response: `{"version":"2.3.2"}`, want: 0},
 		{name: "wrong: major bump for no breaking change", response: `{"version":"3.0.0"}`, want: 0},
+		{
+			// DC3 bug probe: the prompt's own last-release version is
+			// v-prefixed ("v2.3.1"), so a model mirroring that convention
+			// must not be marked wrong for the same leading "v".
+			name:     "correct: leading v prefix, mirroring the prompt's own convention (DC3 bug probe)",
+			response: `{"version":"v2.4.0"}`,
+			want:     1,
+		},
+		{
+			name:     "correct: uppercase V prefix (DC3 bug probe)",
+			response: `{"version":"V2.4.0"}`,
+			want:     1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -238,6 +251,14 @@ func TestDelRelChecksumsSigningPurposeTest_Eval(t *testing.T) {
 			name:     "wrong: neither concept present",
 			response: "Both files just make the release page look more professional.",
 			want:     0,
+		},
+		{
+			// D8 bug probe: "publisher" alone (no "identity") is a
+			// sufficient authenticity term now that "identity" was
+			// replaced with more specific alternatives.
+			name:     "correct: bare 'publisher' term (D8 bug probe)",
+			response: "The checksum catches corruption in transit; the signature ties the file back to the publisher.",
+			want:     1,
 		},
 		{
 			name:     "wrong: only explains the checksum, not the signature",

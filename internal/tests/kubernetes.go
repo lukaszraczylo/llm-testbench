@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"regexp"
-	"strings"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
@@ -69,37 +68,9 @@ func mentionsLimitIncrease() eval.Evaluator {
 // start, or as a bulleted list item.
 var kubectlLiveMutationPattern = regexp.MustCompile(`(?i)kubectl\s+(edit|patch)\b`)
 
-// negationCuePattern matches a word that turns a mention of the forbidden
-// command into a warning against running it, rather than an instruction to
-// run it (e.g. "do not run kubectl patch...").
-var negationCuePattern = regexp.MustCompile(`(?i)\b(don'?t|do not|never|avoid|instead of|not|cannot|can'?t|rather than|without|no need)\b`)
-
-// negationWindow is how many characters before a "kubectl edit|patch"
-// mention are searched for a negation cue.
-const negationWindow = 60
-
-// negationWindowStart returns the earliest byte offset in response to
-// search for a negation cue before a "kubectl edit|patch" match starting
-// at start. The window is the current line, extended back to the start of
-// the immediately preceding line when that line is non-empty: a
-// hard-wrapped sentence whose negation cue landed on the line above (e.g.
-// "...do not run\nkubectl edit...") would otherwise score 0 even though it
-// is the correct, negated answer. Either way, the window never reaches
-// more than negationWindow characters before start.
-func negationWindowStart(response string, start int) int {
-	curLineStart := strings.LastIndexByte(response[:start], '\n') + 1
-
-	windowFloor := curLineStart
-	if curLineStart > 0 {
-		prevLineEnd := curLineStart - 1 // the newline separating the two lines
-		prevLineStart := strings.LastIndexByte(response[:prevLineEnd], '\n') + 1
-		if strings.TrimSpace(response[prevLineStart:prevLineEnd]) != "" {
-			windowFloor = prevLineStart
-		}
-	}
-
-	return max(start-negationWindow, windowFloor)
-}
+// noLiveKubectlMutationWindow is how many characters around a "kubectl
+// edit|patch" mention are searched for a negation cue.
+const noLiveKubectlMutationWindow = 60
 
 // noLiveKubectlMutation scores full credit unless the response instructs
 // running "kubectl edit"/"kubectl patch" against the live cluster. A
@@ -109,29 +80,13 @@ func negationWindowStart(response string, start int) int {
 // would also zero out the best possible answer (one that correctly
 // explains why NOT to run kubectl edit/patch).
 //
-// Every occurrence goes through the same negation-window check, including
-// one at the start of a line (a bulleted "don't do this" list item, or a
-// hard-wrapped sentence whose negation cue landed on the line above): a
-// response is not penalized just because word-wrap or list formatting put
-// the command text at a line start. A genuinely bare imperative still
-// fails, because negationWindowStart never finds a negation cue in its
-// (possibly line-extended) window.
+// Delegates to eval.NoUnnegatedMention (D5), the primitive shared with
+// security.go, databases_redis.go, and delivery_git.go's equivalent
+// guards: its bidirectional, clause-scoped window finds a negation cue
+// before OR after the match, and correctly ignores a cue that belongs to
+// an unrelated adjacent sentence.
 func noLiveKubectlMutation() eval.Evaluator {
-	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
-		matches := kubectlLiveMutationPattern.FindAllStringIndex(response, -1)
-		if len(matches) == 0 {
-			return eval.Score{Value: 1, Detail: "no mention of kubectl edit/patch"}
-		}
-
-		for _, loc := range matches {
-			start := loc[0]
-			windowStart := negationWindowStart(response, start)
-			if !negationCuePattern.MatchString(response[windowStart:start]) {
-				return eval.Score{Value: 0, Detail: "unnegated mention of kubectl edit/patch"}
-			}
-		}
-		return eval.Score{Value: 1, Detail: "every mention of kubectl edit/patch is negated"}
-	})
+	return eval.NoUnnegatedMention(kubectlLiveMutationPattern, noLiveKubectlMutationWindow, nil)
 }
 
 // k8sCrashloopGitopsTest: diagnose an OOMKilled CrashLoopBackOff and

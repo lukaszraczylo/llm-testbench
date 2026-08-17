@@ -127,6 +127,58 @@ func TestJSONField_Float_NumericStringCoercion(t *testing.T) {
 	}
 }
 
+// TestJSONField_Bool_StringCoercion is the DC2 regression, mirroring B9's
+// numeric-string coercion: a model answering {"guaranteed_visible":"false"}
+// instead of {"guaranteed_visible":false} must still score 1.
+func TestJSONField_Bool_StringCoercion(t *testing.T) {
+	e := JSONField("guaranteed_visible", false)
+	tests := []struct {
+		name     string
+		response string
+		want     float64
+	}{
+		{"bool string coerces (lowercase)", `{"guaranteed_visible":"false"}`, 1},
+		{"bool string coerces with whitespace", `{"guaranteed_visible":" false "}`, 1},
+		{"bool string coerces, different case", `{"guaranteed_visible":"False"}`, 1},
+		{"wrong bool string", `{"guaranteed_visible":"true"}`, 0},
+		{"non-boolean string does not coerce", `{"guaranteed_visible":"nope"}`, 0},
+		{"native bool still works", `{"guaranteed_visible":false}`, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := e.Evaluate(context.Background(), tt.response)
+			if got.Value != tt.want {
+				t.Errorf("Evaluate(%q) = %v, want %v (detail: %s)", tt.response, got.Value, tt.want, got.Detail)
+			}
+		})
+	}
+}
+
+// TestJSONField_EnumHyphenSpaceFold is the DC4 regression: a multi-word
+// enum answer spelled with spaces instead of hyphens (or vice versa) must
+// still score 1.
+func TestJSONField_EnumHyphenSpaceFold(t *testing.T) {
+	e := JSONField("anomaly", "non-repeatable-read")
+	tests := []struct {
+		name     string
+		response string
+		want     float64
+	}{
+		{"exact hyphenated form", `{"anomaly":"non-repeatable-read"}`, 1},
+		{"space-separated form folds equal (DC4 bug probe)", `{"anomaly":"non repeatable read"}`, 1},
+		{"mixed hyphen/space form folds equal (DC4 bug probe)", `{"anomaly":"non repeatable-read"}`, 1},
+		{"a genuinely different enum value still fails", `{"anomaly":"dirty-read"}`, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := e.Evaluate(context.Background(), tt.response)
+			if got.Value != tt.want {
+				t.Errorf("Evaluate(%q) = %v, want %v (detail: %s)", tt.response, got.Value, tt.want, got.Detail)
+			}
+		})
+	}
+}
+
 func TestJSONField_NestedPath(t *testing.T) {
 	e := JSONField("task1", "search_web")
 	got := e.Evaluate(context.Background(), `{"task1":"search_web","task2":"read_file"}`)

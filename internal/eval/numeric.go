@@ -97,7 +97,18 @@ func classifyMatch(text string, start, end int) (numberCandidate, bool) {
 		// ("float64x2") keep a word byte after the x and stay rejected.
 		isMultiplier := (text[end] == 'x' || text[end] == 'X') &&
 			(end+1 >= len(text) || !isWordByte(text[end+1]))
-		if !isMultiplier {
+		// Permit a glued byte-size unit suffix ("30MB" = 30, no space)
+		// (DC1): case-insensitive kb/mb/gb/tb, with nothing word-like
+		// after it - "300MBs" (plural) keeps a word byte after the unit
+		// and stays rejected, the same strictness as the x/X case above.
+		isUnitSuffix := false
+		if end+2 <= len(text) {
+			switch strings.ToLower(text[end : end+2]) {
+			case "kb", "mb", "gb", "tb":
+				isUnitSuffix = end+2 >= len(text) || !isWordByte(text[end+2])
+			}
+		}
+		if !isMultiplier && !isUnitSuffix {
 			return numberCandidate{}, false // e.g. "24bytes" with no separator
 		}
 	}

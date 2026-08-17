@@ -44,8 +44,8 @@ func TestDBRedisStructureChoiceTest_Eval(t *testing.T) {
 	}
 }
 
-func TestDBRedisTTLEvictionTest_Eval(t *testing.T) {
-	tc := dbRedisTTLEvictionTest()
+func TestDBRedisNoevictionWriteTest_Eval(t *testing.T) {
+	tc := dbRedisNoevictionWriteTest()
 
 	tests := []struct {
 		name     string

@@ -111,9 +111,20 @@ func TestDBPGDeadlockLockOrderTest_Eval(t *testing.T) {
 	}{
 		{"correct", `{"deadlock":true,"safe_order_ids":[1,2]}`, 1},
 		{"correct fenced with prose", "Yes, they deadlock.\n```json\n{\"deadlock\":true,\"safe_order_ids\":[1,2]}\n```", 1},
-		{"says no deadlock", `{"deadlock":false,"safe_order_ids":[1,2]}`, 2.0 / 3.0},
-		{"reversed safe order", `{"deadlock":true,"safe_order_ids":[2,1]}`, 1.0 / 3.0},
+		// D9: deadlock (weight 3) now dominates the score over the safe
+		// order (weight 1, combined as one unit): getting the core
+		// diagnosis wrong costs far more than getting the order wrong.
+		{"says no deadlock", `{"deadlock":false,"safe_order_ids":[1,2]}`, 0.25},
+		{"reversed safe order", `{"deadlock":true,"safe_order_ids":[2,1]}`, 0.75},
 		{"everything wrong", `{"deadlock":false,"safe_order_ids":[2,1]}`, 0},
+		{
+			// D9 bug probe: the diagnosis matters far more than the order -
+			// a correct diagnosis with a fully-wrong order still beats a
+			// wrong diagnosis with a fully-correct order.
+			name:     "correct diagnosis with wrong order still outscores wrong diagnosis with correct order (D9 bug probe)",
+			response: `{"deadlock":true,"safe_order_ids":[2,1]}`,
+			want:     0.75,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -134,24 +145,35 @@ func TestDBPGReplicaFailoverTest_Eval(t *testing.T) {
 		want     float64
 	}{
 		{
-			name:     "correct: names data loss and async cause",
-			response: "Because replication is asynchronous, that commit may be lost - the replica never received its WAL before promotion.",
+			name:     "correct object",
+			response: `{"guaranteed_visible":false,"reason":"async-wal-not-replicated"}`,
 			want:     1,
 		},
 		{
-			name:     "correct: alternate phrasing",
-			response: "No, it is not guaranteed to be visible; async replication means the promoted replica can be missing it.",
+			name:     "correct fenced with prose",
+			response: "```json\n{\"guaranteed_visible\":false,\"reason\":\"async-wal-not-replicated\"}\n```",
 			want:     1,
 		},
 		{
 			name:     "wrong: claims it is guaranteed durable",
-			response: "Yes, Postgres guarantees every committed transaction is always visible after failover.",
-			want:     0,
+			response: `{"guaranteed_visible":true,"reason":"async-wal-not-replicated"}`,
+			want:     0.4,
 		},
 		{
-			name:     "partial: mentions loss but not the async cause",
-			response: "That transaction can be lost after the failover.",
-			want:     2.0 / 3.0,
+			name:     "right verdict, wrong reason",
+			response: `{"guaranteed_visible":false,"reason":"replica-storage-corrupted"}`,
+			want:     0.6,
+		},
+		{
+			// D2 bug probe: the exact negation of the correct answer -
+			// stating no data is lost - used to score 1.0 under the old
+			// ContainsAny("lost", "data loss", ...) substring search,
+			// since "nothing is lost" and "no data loss" both contain
+			// those literal substrings. The forced boolean field cannot be
+			// polarity-confused this way.
+			name:     "wrong: exact negation of the correct answer scores near-zero, not 1.0 (D2 bug probe)",
+			response: `{"guaranteed_visible":true,"reason":"sync-replication-guarantees-durability"}`,
+			want:     0,
 		},
 	}
 	for _, tt := range tests {

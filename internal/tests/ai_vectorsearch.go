@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
@@ -65,7 +66,7 @@ division needed? Respond with only one word: yes or no.`
 		Subcategory: "vector-search",
 		Description: "Confirm that for two unit-normalized vectors, the plain dot product equals the cosine similarity.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("yes"),
+		Eval:        eval.ExactToken("yes"),
 	}
 }
 
@@ -91,18 +92,23 @@ var vecRecallAtKWant = wpRecallAtK(vecRecallAtKRelevant, vecRecallAtKRetrieved)
 // ranked top-k retrieval list, distinct from the whitepapers recall@k
 // fixture.
 func vecRecallAtKTest() testkit.Test {
+	// C14: the relevant/retrieved lists are interpolated from
+	// vecRecallAtKRelevant/vecRecallAtKRetrieved (the vec-rrf-fusion
+	// pattern) rather than hand-typed, so the displayed lists can never
+	// drift from what vecRecallAtKWant is actually computed from.
 	prompt := `Recall@k is a retrieval-quality metric: for one query, it is
 the fraction of that query's truly relevant items that appear anywhere
 within the system's top k retrieved results, regardless of exact rank.
 recall@k = |relevant intersect top-k| / |relevant|.
 
-A query's truly relevant vectors are: V3, V8, V11, V14, V20.
+A query's truly relevant vectors are: ` + strings.Join(vecRecallAtKRelevant, ", ") + `.
 
 A vector search system's ranked top-5 results for that query are, in rank
-order: V8, V1, V14, V6, V9.
+order: ` + strings.Join(vecRecallAtKRetrieved, ", ") + `.
 
-Compute recall@5 for this query. Respond with only the number, as a
-decimal (e.g. 0.6), rounded to 4 decimal places.`
+Compute recall@5 for this query. Respond with only the number, rounded to
+4 decimal places, with no commas, units, or other text (for example:
+0.4000).`
 
 	return testkit.Test{
 		ID:          "vec-recall-at-k",
@@ -138,7 +144,7 @@ go up, or both go down? Respond with only one word: up or down.`
 		Subcategory: "vector-search",
 		Description: "State that increasing HNSW's efSearch moves recall and query latency in the same direction (up).",
 		Prompt:      prompt,
-		Eval:        eval.Equals("up"),
+		Eval:        eval.ExactToken("up"),
 	}
 }
 
@@ -147,26 +153,36 @@ go up, or both go down? Respond with only one word: up or down.`
 // (different m, nbits, dimension, and a total-bytes framing rather than a
 // ratio).
 //
+// vecPQMemoryMathM, vecPQMemoryMathNBits, and vecPQMemoryMathVectorCount are
+// the PQ parameters for vecPQMemoryMathTest, interpolated into the prompt
+// (C14) so the displayed parameters can never drift from what
+// vecPQMemoryMathWant is actually computed from.
+const (
+	vecPQMemoryMathM           = 16
+	vecPQMemoryMathNBits       = 4
+	vecPQMemoryMathVectorCount = 1000000
+)
+
 // ground truth: codeBytes = m*nbits/8 = 16*4/8 = 8 bytes per compressed
 // vector (via wpQuantizedCodeBytes, already defined in
 // whitepapers_compute.go). Total for 1,000,000 vectors = 8 * 1,000,000 =
 // 8,000,000 bytes. ai_vectorsearch_test.go independently recomputes this
 // with plain arithmetic.
-var vecPQMemoryMathWant = wpQuantizedCodeBytes(16, 4) * 1000000
+var vecPQMemoryMathWant = wpQuantizedCodeBytes(vecPQMemoryMathM, vecPQMemoryMathNBits) * vecPQMemoryMathVectorCount
 
 func vecPQMemoryMathTest() testkit.Test {
-	prompt := `Product quantization (PQ) compresses each vector by splitting
+	prompt := fmt.Sprintf(`Product quantization (PQ) compresses each vector by splitting
 it into m equal-length subvectors and quantizing each one independently
 against its own codebook, storing only each subvector's nbits-bit centroid
 index. Concatenating the m per-subvector codes gives the full compressed
 representation, with no wasted bits (assume m*nbits is a multiple of 8).
 
-An index uses m = 16 subvectors and nbits = 4 bits per subvector.
+An index uses m = %d subvectors and nbits = %d bits per subvector.
 
 What is the total memory, in bytes, needed to store the compressed
-representations of 1,000,000 vectors indexed with these PQ parameters?
+representations of %d vectors indexed with these PQ parameters?
 Respond with only the integer number of bytes, with no commas, units, or
-other text (for example: 12345678).`
+other text (for example: 12345678).`, vecPQMemoryMathM, vecPQMemoryMathNBits, vecPQMemoryMathVectorCount)
 
 	return testkit.Test{
 		ID:          "vec-pq-memory-math",
@@ -207,7 +223,7 @@ only one word: pre or post.`
 		Subcategory: "vector-search",
 		Description: "Choose pre-filtering over post-filtering ANN search when the metadata filter is highly selective (0.5%).",
 		Prompt:      prompt,
-		Eval:        eval.Equals("pre"),
+		Eval:        eval.ExactToken("pre"),
 	}
 }
 
@@ -280,6 +296,12 @@ Respond with only the number, rounded to 4 decimal places.`
 	}
 }
 
+// vecDistanceToSimilarityD is the Euclidean distance for
+// vecDistanceToSimilarityTest, interpolated into the prompt (C14) so the
+// displayed value can never drift from what vecDistanceToSimilarityWant is
+// actually computed from.
+const vecDistanceToSimilarityD = 0.6
+
 // vecDistanceToSimilarityWant is derived by calling
 // aiUnitDistanceToCosineSimilarity, not hardcoded.
 //
@@ -287,18 +309,19 @@ Respond with only the number, rounded to 4 decimal places.`
 // cos_sim = 1 - d^2/2. With d = 0.6, d^2 = 0.36, cos_sim = 1 - 0.18 = 0.82.
 // ai_vectorsearch_test.go independently recomputes this with plain
 // arithmetic.
-var vecDistanceToSimilarityWant = round4dp(aiUnitDistanceToCosineSimilarity(0.6))
+var vecDistanceToSimilarityWant = round4dp(aiUnitDistanceToCosineSimilarity(vecDistanceToSimilarityD))
 
 func vecDistanceToSimilarityTest() testkit.Test {
-	prompt := `Two vectors are both unit-length (L2-normalized to magnitude
+	prompt := fmt.Sprintf(`Two vectors are both unit-length (L2-normalized to magnitude
 1). For unit-length vectors, squared Euclidean distance relates to cosine
 similarity by: ||a-b||^2 = |a|^2 + |b|^2 - 2*cos_sim(a,b) = 2 - 2*cos_sim(a,b),
 since |a|=|b|=1. Rearranging: cos_sim(a,b) = 1 - (||a-b||^2) / 2.
 
-The Euclidean distance between this pair is 0.6.
+The Euclidean distance between this pair is %v.
 
 Using the formula above, compute cos_sim(a,b). Respond with only the
-number, rounded to 4 decimal places.`
+number, rounded to 4 decimal places, with no commas, units, or other text
+(for example: 0.8200).`, vecDistanceToSimilarityD)
 
 	return testkit.Test{
 		ID:          "vec-distance-to-similarity",
@@ -331,16 +354,31 @@ const vecNearDuplicateThreshold = 0.97
 // this with plain arithmetic.
 var vecNearDuplicateThresholdWant = round4dp(cosineSimilarity(vecNearDuplicateA, vecNearDuplicateB) - vecNearDuplicateThreshold)
 
+// aiFormatIntVector renders a []float64 of whole numbers as "[1, 2, 2, 1]"
+// prompt text, used to interpolate a fixture vector directly from the Go
+// slice it is graded against (C14) rather than a hand-typed duplicate.
+func aiFormatIntVector(v []float64) string {
+	parts := make([]string, len(v))
+	for i, x := range v {
+		parts[i] = fmt.Sprintf("%d", int(x))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
 func vecNearDuplicateThresholdTest() testkit.Test {
-	prompt := `A vector index deduplicates near-identical items: a candidate
+	prompt := fmt.Sprintf(`A vector index deduplicates near-identical items: a candidate
 pair is treated as a near-duplicate only when its cosine similarity is at
-or above 0.97.
+or above %v.
 
-Candidate pair: a = [1, 2, 2, 1], b = [2, 2, 1, 1].
+Candidate pair: a = %s, b = %s.
 
-Compute the cosine similarity of a and b, then subtract the 0.97 threshold
+Compute the cosine similarity of a and b, then subtract the %v threshold
 from it (similarity minus threshold). Respond with only the resulting
-number, rounded to 4 decimal places (it may be negative).`
+number, rounded to 4 decimal places, with no commas, units, or other text
+(it may be negative; for example: -0.0700).`,
+		vecNearDuplicateThreshold,
+		aiFormatIntVector(vecNearDuplicateA), aiFormatIntVector(vecNearDuplicateB),
+		vecNearDuplicateThreshold)
 
 	return testkit.Test{
 		ID:          "vec-near-duplicate-threshold",
@@ -414,7 +452,7 @@ Two embedding models are candidates:
 - option 768: produces 768-dimensional embeddings.
 
 Which option's total uncompressed storage fits within the 60 GB budget?
-Respond with only a JSON object: {"choice":"128"|"768"}`
+Respond with only a JSON object: {"choice":128|768}`
 
 	return testkit.Test{
 		ID:          "vec-embedding-dimension-tradeoff",
@@ -422,6 +460,9 @@ Respond with only a JSON object: {"choice":"128"|"768"}`
 		Subcategory: "vector-search",
 		Description: "Pick the embedding dimension (128 vs 768) whose uncompressed float32 storage fits a fixed 60 GB budget for 100M vectors.",
 		Prompt:      prompt,
-		Eval:        eval.JSONField("choice", "128"),
+		// C7: choice is a number (mirrors rag-chunk-size-tradeoff's
+		// chunk_size_tokens), not a quoted string - the prompt's own
+		// template shows it unquoted.
+		Eval: eval.JSONField("choice", 128),
 	}
 }

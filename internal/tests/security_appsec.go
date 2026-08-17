@@ -1,6 +1,9 @@
 package tests
 
 import (
+	"context"
+	"regexp"
+
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
@@ -137,8 +140,10 @@ its 1-based position in this listing:
 
 ` + secPathTraversalFixture + `
 
-Which line number introduces a path-traversal vulnerability, and what
-category of fix addresses it? Respond with only a JSON object:
+Which line number builds the unsanitized filesystem path (concatenating a
+caller-supplied value onto a base directory with no cleaning of ".."
+segments), and what category of fix addresses it? Respond with only a JSON
+object:
 {"line":<number>,"fix":"<one of: sanitize-path, escape-output, rate-limit>"}`
 
 	evaluator := eval.Mean(
@@ -313,7 +318,7 @@ Respond with only one word: yes or no.`
 		Subcategory: "appsec",
 		Description: "Decide whether a header-bearer-token-only endpoint (no cookies) needs CSRF protection.",
 		Prompt:      prompt,
-		Eval:        secExactAnswer("no"),
+		Eval:        eval.ExactToken("no"),
 	}
 }
 
@@ -352,6 +357,28 @@ a JSON object:
 	}
 }
 
+// secQuantityUpperBoundConcretePattern matches a concrete numeric
+// upper-bound expression: an explicit min/max pair, or a numeric range like
+// "1..10000" (CC3).
+var secQuantityUpperBoundConcretePattern = regexp.MustCompile(`(?i)\d+\s*\.\.\s*\d+|\bmin(?:imum)?\b[^.\n]{0,20}\bmax(?:imum)?\b|\bmax(?:imum)?\b[^.\n]{0,20}\bmin(?:imum)?\b`)
+
+// secQuantityUpperBoundEval scores full credit when the response either
+// uses one of the generic upper-bound words ("maximum", "upper bound",
+// "cap", "overflow", "too large", "excessively large", "unbounded") or
+// states a concrete numeric bound expression instead (CC3).
+func secQuantityUpperBoundEval() eval.Evaluator {
+	words := eval.ContainsAny("maximum", "upper bound", "cap", "overflow", "too large", "excessively large", "unbounded")
+	return eval.EvaluatorFunc(func(ctx context.Context, response string) eval.Score {
+		if w := words.Evaluate(ctx, response); w.Value == 1 {
+			return w
+		}
+		if secQuantityUpperBoundConcretePattern.MatchString(response) {
+			return eval.Score{Value: 1, Detail: "matches a concrete numeric upper-bound expression"}
+		}
+		return eval.Score{Value: 0, Detail: "no upper-bound cue (generic word or concrete numeric bound) found"}
+	})
+}
+
 // secInputValidationBoundaryTest: name the two numeric boundary checks
 // missing from an unvalidated order-quantity field.
 //
@@ -371,9 +398,15 @@ validation runs on it.
 Name the two numeric boundary checks that must be added to quantity before
 it is used, and why each one matters.`
 
+	// CC3: the upper-bound group's plain words ("cap", "overflow") are
+	// generic enough to plausibly appear in unrelated prose. A response
+	// that instead states a concrete numeric bound (a min/max pair, or an
+	// explicit range like "1..10000") is an equally valid, even more
+	// specific answer, so it is accepted as an alternative alongside the
+	// existing word list rather than only via those words.
 	evaluator := eval.Mean(
 		eval.ContainsAny("negative", "<= 0", "zero or negative", "greater than zero", "greater than 0", "positive"),
-		eval.ContainsAny("maximum", "upper bound", "cap", "overflow", "too large", "excessively large", "unbounded"),
+		secQuantityUpperBoundEval(),
 	)
 
 	return testkit.Test{

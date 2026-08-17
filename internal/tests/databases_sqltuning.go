@@ -14,7 +14,7 @@ func registerDBSQLTuningTests(r *testkit.Registry) {
 	r.Register(dbSQLNullInWhereTest())
 	r.Register(dbSQLGroupByHavingTest())
 	r.Register(dbSQLWindowRankTest())
-	r.Register(dbSQLCompositeIndexOrderTest())
+	r.Register(dbSQLCompositeIndexSkipColumnTest())
 	r.Register(dbSQLKeysetPaginationTest())
 	r.Register(dbSQLCoveringIndexTest())
 	r.Register(dbSQLEquivalentRewriteTest())
@@ -336,12 +336,18 @@ ORDER BY region;
 Respond with only a JSON array of objects, ordered exactly as the query's
 ORDER BY would return them: [{"region":"...","total":<number>}, ...]`
 
-	evaluator := eval.Mean(
-		dbJSONArrayLength(len(dbSQLGroupByHavingWant)),
-		eval.JSONField("[0].region", dbSQLGroupByHavingWant[0].Region),
-		eval.JSONField("[0].total", dbSQLGroupByHavingWant[0].Total),
-		eval.JSONField("[1].region", dbSQLGroupByHavingWant[1].Region),
-		eval.JSONField("[1].total", dbSQLGroupByHavingWant[1].Total),
+	// D9: weight the array-length check 2x each individual field check, so
+	// a response that leaks an extra group through (e.g. forgetting to
+	// apply the HAVING filter) cannot stay close to full credit just by
+	// getting the two checked elements right - the structural correctness
+	// of "exactly the right number of groups" matters more than any one
+	// field.
+	evaluator := eval.All(
+		eval.W(dbJSONArrayLength(len(dbSQLGroupByHavingWant)), 2),
+		eval.W(eval.JSONField("[0].region", dbSQLGroupByHavingWant[0].Region), 1),
+		eval.W(eval.JSONField("[0].total", dbSQLGroupByHavingWant[0].Total), 1),
+		eval.W(eval.JSONField("[1].region", dbSQLGroupByHavingWant[1].Region), 1),
+		eval.W(eval.JSONField("[1].total", dbSQLGroupByHavingWant[1].Total), 1),
 	)
 
 	return testkit.Test{
@@ -440,44 +446,74 @@ in each department? Respond with only a JSON object:
 	}
 }
 
-// dbSQLCompositeIndexSchema is the inline schema + query for
-// dbSQLCompositeIndexOrderTest.
-const dbSQLCompositeIndexSchema = `Table: sessions(id bigserial, user_id bigint, created_at timestamptz, ip inet)
+// dbSQLCompositeIndexSkipSchema is the inline schema + index + query for
+// dbSQLCompositeIndexSkipColumnTest.
+//
+// D10: this test replaces the former sql-composite-index-order, which
+// duplicated pg-index-choice (databases_postgres.go) almost exactly -
+// same "pick equality-then-range column order" question shape, just a
+// different table/column naming. This test instead covers a genuinely
+// distinct btree composite-index rule: a query that skips the middle
+// column of a 3-column index entirely.
+const dbSQLCompositeIndexSkipSchema = `Table: events(id bigserial, tenant_id bigint, event_type text, created_at timestamptz)
+
+Index: CREATE INDEX idx_events_tenant_type_created ON events(tenant_id, event_type, created_at);
 
 Query:
-SELECT * FROM sessions
-WHERE user_id = $1 AND created_at > $2
-ORDER BY created_at DESC
-LIMIT 50;`
+SELECT * FROM events
+WHERE tenant_id = 42 AND created_at > '2026-01-01';`
 
-// dbSQLCompositeIndexOrderTest: pick the composite index column order
-// (equality column first, then the range/sort column) that best serves an
-// inline query.
+// dbSQLCompositeIndexSkipColumnTest: identify which column of a 3-column
+// composite index actually serves as an index seek (Index Cond) versus
+// which column can only be applied as a post-index Filter, when the
+// query's WHERE clause skips the index's middle column entirely.
 //
-// ground truth: user_id is filtered by exact equality; created_at is
-// filtered by a range AND drives ORDER BY. Leading a composite index with
-// the equality column narrows to one user's rows first; following with
-// created_at then serves both the range filter and the sort from the
-// index directly. Reversing the order (created_at, user_id) would force
-// scanning every session in the time range across all users before
-// filtering by user_id.
-func dbSQLCompositeIndexOrderTest() testkit.Test {
-	prompt := `Here is a table schema and a query that runs frequently:
+// ground truth: the composite btree index (tenant_id, event_type,
+// created_at) is physically sorted first by tenant_id, then by event_type
+// WITHIN each tenant_id, then by created_at WITHIN each (tenant_id,
+// event_type) pair. The query constrains tenant_id (equality) and
+// created_at (range) but never constrains event_type - the index's middle
+// column - at all. Because created_at is only sorted within each
+// event_type sub-group (not globally within a tenant_id), Postgres cannot
+// use created_at as part of the index seek when event_type is
+// unconstrained: it can only narrow the seek to the tenant_id=42 range
+// (Index Cond: tenant_id = 42) and must apply created_at > '2026-01-01' as
+// a Filter evaluated against every row in that range, not as part of the
+// seek itself. This is the standard btree composite-index rule that only
+// a contiguous, leading, query-constrained prefix of index columns can be
+// used for seeking - skipping an unconstrained column strands every
+// column after it as filter-only.
+func dbSQLCompositeIndexSkipColumnTest() testkit.Test {
+	prompt := `Here is a table schema, a composite index, and a query that
+runs frequently:
 
-` + "```\n" + dbSQLCompositeIndexSchema + "\n```" + `
+` + "```\n" + dbSQLCompositeIndexSkipSchema + "\n```" + `
 
-Which two columns, in which order, should a single composite index be
-defined on to best serve this exact query (equality filters should lead a
-composite index, ahead of range/sort columns)? Respond with only a JSON
-array of the two column names in index-definition order, e.g. ["a","b"].`
+Note the query does NOT filter on event_type, the index's middle column.
+A btree index can only be used as a seek (an Index Cond) for a contiguous
+prefix of its columns that the query actually constrains, starting from
+the leading column; it cannot skip an unconstrained column to seek on a
+later one, because index entries are only sorted by that later column
+WITHIN each value of the skipped column.
+
+Which single column does this index serve as an efficient Index Cond
+(seek)? Which single column can only be applied as a Filter after the
+index narrows to the matching range (not as part of the index seek
+itself)? Respond with only a JSON object:
+{"index_cond_column":"<column>","filter_only_column":"<column>"}`
+
+	evaluator := eval.Mean(
+		eval.JSONField("index_cond_column", "tenant_id"),
+		eval.JSONField("filter_only_column", "created_at"),
+	)
 
 	return testkit.Test{
-		ID:          "sql-composite-index-order",
+		ID:          "sql-composite-index-skip-column",
 		Category:    "databases",
 		Subcategory: "sql-tuning",
-		Description: "Pick composite index column order (user_id, created_at) for an inline equality+range+sort query.",
+		Description: "Identify that skipping a 3-column composite index's middle column strands the query's range filter as a post-index Filter, not a seek.",
 		Prompt:      prompt,
-		Eval:        eval.JSONStringArrayEquals([]string{"user_id", "created_at"}),
+		Eval:        evaluator,
 	}
 }
 
@@ -507,7 +543,7 @@ word: offset or keyset.`
 		Subcategory: "sql-tuning",
 		Description: "Pick keyset/seek pagination over OFFSET pagination for constant latency 20M rows deep into a 50M-row table.",
 		Prompt:      prompt,
-		Eval:        dbExactAnswer("keyset"),
+		Eval:        eval.ExactToken("keyset"),
 	}
 }
 
@@ -535,7 +571,7 @@ only "yes" or "no".`
 		Subcategory: "sql-tuning",
 		Description: "Confirm an index containing every column a query needs (customer_id, status) enables an index-only scan with no heap visit.",
 		Prompt:      prompt,
-		Eval:        dbExactAnswer("yes"),
+		Eval:        eval.ExactToken("yes"),
 	}
 }
 

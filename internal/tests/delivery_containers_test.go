@@ -2,6 +2,11 @@ package tests
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -86,6 +91,15 @@ func TestDelDockerMultistageSizeBenefitTest_Eval(t *testing.T) {
 			response: "Switch the final image to alpine instead of golang.",
 			want:     0.5,
 		},
+		{
+			// D8 bug probe: a terse, technical-syntax answer that never
+			// says the literal word "multi-stage" but genuinely
+			// demonstrates the mechanism (COPY --from a named build
+			// stage) must still score full credit.
+			name:     "correct: technical syntax only, never says 'multi-stage' literally (D8 bug probe)",
+			response: "In the final stage: COPY --from=builder /app /app, using scratch as the base.",
+			want:     1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -110,6 +124,13 @@ func TestDelDockerImageSizeMathTest_Eval(t *testing.T) {
 		{name: "with units spelled out", response: "8 + 22 = 30 megabytes.", want: 1},
 		{name: "wrong: sums every layer including the discarded build stage", response: "534", want: 0},
 		{name: "wrong: only the alpine base, forgets the binary layer", response: "8", want: 0},
+		{
+			// DC1 bug probe: a glued unit suffix ("30MB", no space) must
+			// extract the same as the spaced form.
+			name:     "glued unit suffix, no space (DC1 bug probe)",
+			response: "The final image is 30MB.",
+			want:     1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -150,8 +171,18 @@ func TestDelDockerNonrootUserCapsTest_Eval(t *testing.T) {
 			want:     0,
 		},
 		{
-			name:     "wrong: only addresses the user, not capabilities",
+			// D8: a generic "add a USER instruction" mention with no
+			// concrete UID/username/adduser artifact is exactly the
+			// vacuous echo of the prompt's own wording ("this Dockerfile
+			// currently has no USER instruction") that this fix targets -
+			// it no longer earns partial credit on its own.
+			name:     "wrong: generic USER mention with no concrete artifact, still misses capabilities",
 			response: "Add a USER instruction pointing at a non-root UID.",
+			want:     0,
+		},
+		{
+			name:     "partial: concrete USER artifact but capabilities still missing",
+			response: "Add `USER 1000` to the Dockerfile.",
 			want:     0.5,
 		},
 	}
@@ -280,8 +311,17 @@ func TestDelDockerLayerCountTest_Eval(t *testing.T) {
 		{name: "bare number", response: "2", want: 1},
 		{name: "sentence form", response: "This Dockerfile adds 2 new layers.", want: 1},
 		{name: "explains then answers", response: "Only COPY and RUN create layers here, so the answer is 2.", want: 1},
-		{name: "wrong: counts every instruction", response: "8", want: 0},
+		{name: "wrong: counts every instruction", response: "7", want: 0},
 		{name: "wrong: forgets the RUN layer", response: "1", want: 0},
+		{
+			// D1 bug probe: WORKDIR is not in this fixture at all, but a
+			// wrong answer that (incorrectly) assumes it's present AND
+			// counts it as a layer-creating instruction must still score 0
+			// (want stays 2 either way, since WORKDIR is genuinely absent).
+			name:     "wrong: assumes a WORKDIR layer that is not in this fixture (D1 bug probe)",
+			response: "3",
+			want:     0,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -290,5 +330,79 @@ func TestDelDockerLayerCountTest_Eval(t *testing.T) {
 				t.Errorf("Eval.Evaluate(%q) = %v, want %v (detail: %s)", tt.response, got.Value, tt.want, got.Detail)
 			}
 		})
+	}
+}
+
+// delDockerStripLineNumbers removes the "N: " prompt-display prefix from
+// each line of a numbered Dockerfile fixture, producing real Dockerfile
+// syntax that can actually be built.
+func delDockerStripLineNumbers(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if idx := strings.Index(line, ": "); idx >= 0 {
+			lines[i] = line[idx+2:]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// delDockerInspectLayerCount runs `docker inspect <ref> --format
+// '{{len .RootFS.Layers}}'` and returns the parsed layer count.
+func delDockerInspectLayerCount(t *testing.T, ref string) int {
+	t.Helper()
+	// #nosec G204 -- ref is always a fixed literal image tag/reference
+	// built earlier in this same test, never external/user-controlled
+	// input.
+	out, err := exec.Command("docker", "inspect", ref, "--format", "{{len .RootFS.Layers}}").Output() //nolint:gosec // see comment above
+	if err != nil {
+		t.Fatalf("docker inspect %s: %v", ref, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("docker inspect %s: unparseable layer count %q: %v", ref, string(out), err)
+	}
+	return n
+}
+
+// TestDelDockerLayerCountWant_GroundTruth verifies delDockerLayerCountWant
+// against a real Docker build (D1) rather than trusting the derivation
+// comment alone: it builds delDockerLayerCountDockerfile (line numbers
+// stripped) with a dummy "app" binary, then diffs the built image's
+// RootFS.Layers count against the alpine:3.20 base image's own layer
+// count. Skips if docker is not installed or its daemon is unreachable.
+func TestDelDockerLayerCountWant_GroundTruth(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not installed")
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skip("docker daemon not reachable")
+	}
+
+	dir := t.TempDir()
+	dockerfile := delDockerStripLineNumbers(delDockerLayerCountDockerfile)
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app"), []byte("#!/bin/sh\necho hi\n"), 0o600); err != nil {
+		t.Fatalf("write app: %v", err)
+	}
+
+	const tag = "llmtestbench-layercount-groundtruth:test"
+	// #nosec G204 -- tag is a fixed literal and dir is a t.TempDir() path,
+	// never external/user-controlled input.
+	build := exec.Command("docker", "build", "-t", tag, dir) //nolint:gosec // see comment above
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("docker build: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("docker", "rmi", tag).Run()
+	})
+
+	totalLayers := delDockerInspectLayerCount(t, tag)
+	baseLayers := delDockerInspectLayerCount(t, "alpine:3.20")
+	newLayers := totalLayers - baseLayers
+
+	if newLayers != delDockerLayerCountWant {
+		t.Fatalf("docker-verified new layer count = %d (total %d, base %d), want %d", newLayers, totalLayers, baseLayers, delDockerLayerCountWant)
 	}
 }

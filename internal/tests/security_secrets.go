@@ -81,8 +81,8 @@ func secRemediationOrderTest() testkit.Test {
 to a shared remote that multiple collaborators have cloned.
 
 Order these 4 remediation steps correctly:
-["rotate-the-leaked-credential", "remove-secret-from-current-code",
-"rewrite-git-history-to-purge-it", "force-push-and-notify-collaborators"]
+["force-push-and-notify-collaborators", "remove-secret-from-current-code",
+"rotate-the-leaked-credential", "rewrite-git-history-to-purge-it"]
 
 Respond with only a JSON array containing all 4 step ids in the correct
 order.`
@@ -158,7 +158,7 @@ with only one word: yes or no.`
 		Subcategory: "secrets",
 		Description: "Confirm that Kubernetes Secret base64 encoding is not encryption and provides no confidentiality by itself.",
 		Prompt:      prompt,
-		Eval:        secExactAnswer("no"),
+		Eval:        eval.ExactToken("no"),
 	}
 }
 
@@ -189,9 +189,9 @@ replicas must be rotated without causing any request to fail
 authentication during the rollout.
 
 Order these 4 steps correctly:
-["create-new-credential-alongside-old",
-"deploy-config-with-new-credential-to-all-replicas",
-"verify-all-replicas-using-new-credential", "revoke-old-credential"]
+["verify-all-replicas-using-new-credential", "revoke-old-credential",
+"create-new-credential-alongside-old",
+"deploy-config-with-new-credential-to-all-replicas"]
 
 Respond with only a JSON array containing all 4 step ids in the correct
 order.`
@@ -300,7 +300,7 @@ request from a fork? Respond with only one word: yes or no.`
 		Subcategory: "secrets",
 		Description: "Confirm repository secrets must not be exposed to CI workflow runs triggered by pull requests from forks.",
 		Prompt:      prompt,
-		Eval:        secExactAnswer("no"),
+		Eval:        eval.ExactToken("no"),
 	}
 }
 
@@ -364,6 +364,6 @@ current working tree? Respond with only one word: yes or no.`
 		Subcategory: "secrets",
 		Description: "Confirm a later .gitignore entry and working-tree deletion do not remove a secret already present in earlier git history.",
 		Prompt:      prompt,
-		Eval:        secExactAnswer("yes"),
+		Eval:        eval.ExactToken("yes"),
 	}
 }

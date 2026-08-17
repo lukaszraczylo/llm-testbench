@@ -202,10 +202,22 @@ func TestDBSQLGroupByHavingTest_Eval(t *testing.T) {
 	}{
 		{"correct", `[{"region":"APAC","total":400},{"region":"EU","total":450}]`, 1},
 		{"correct fenced with prose", "Result:\n```json\n[{\"region\":\"APAC\",\"total\":400},{\"region\":\"EU\",\"total\":450}]\n```", 1},
-		{"wrong order", `[{"region":"EU","total":450},{"region":"APAC","total":400}]`, 0.2},
-		{"missing a group", `[{"region":"APAC","total":400}]`, 0.4},
-		{"wrong total for one group", `[{"region":"APAC","total":401},{"region":"EU","total":450}]`, 0.8},
-		{"forgot HAVING filter, includes US", `[{"region":"APAC","total":400},{"region":"EU","total":450},{"region":"US","total":210}]`, 0.8},
+		// D9: dbJSONArrayLength is now weighted 2x each individual field
+		// check (total weight 6, not 5), so these expected values shift
+		// from the old equal-weight Mean.
+		{"wrong order", `[{"region":"EU","total":450},{"region":"APAC","total":400}]`, 2.0 / 6.0},
+		{"missing a group", `[{"region":"APAC","total":400}]`, 2.0 / 6.0},
+		{"wrong total for one group", `[{"region":"APAC","total":401},{"region":"EU","total":450}]`, 5.0 / 6.0},
+		{
+			// D9 bug probe: this exact case is D9's motivating scenario -
+			// leaking an extra group through by forgetting the HAVING
+			// filter now scores lower (4/6) than it did under the old
+			// equal-weight design (4/5=0.8), since the structural
+			// array-length mismatch now costs more.
+			name:     "forgot HAVING filter, includes US (D9 bug probe)",
+			response: `[{"region":"APAC","total":400},{"region":"EU","total":450},{"region":"US","total":210}]`,
+			want:     4.0 / 6.0,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -273,19 +285,34 @@ func TestDBSQLWindowRankTest_Eval(t *testing.T) {
 	}
 }
 
-func TestDBSQLCompositeIndexOrderTest_Eval(t *testing.T) {
-	tc := dbSQLCompositeIndexOrderTest()
+func TestDBSQLCompositeIndexSkipColumnTest_Eval(t *testing.T) {
+	tc := dbSQLCompositeIndexSkipColumnTest()
 
 	tests := []struct {
 		name     string
 		response string
 		want     float64
 	}{
-		{"correct", `["user_id", "created_at"]`, 1},
-		{"correct fenced", "```json\n[\"user_id\", \"created_at\"]\n```", 1},
-		{"reversed order", `["created_at", "user_id"]`, 0},
-		{"missing a column", `["user_id"]`, 0},
-		{"wrong column entirely", `["user_id", "ip"]`, 0},
+		{"correct", `{"index_cond_column":"tenant_id","filter_only_column":"created_at"}`, 1},
+		{"correct fenced with prose", "```json\n{\"index_cond_column\":\"tenant_id\",\"filter_only_column\":\"created_at\"}\n```", 1},
+		{
+			name:     "swapped: both wrong",
+			response: `{"index_cond_column":"created_at","filter_only_column":"tenant_id"}`,
+			want:     0,
+		},
+		{
+			// D10 bug probe: the natural wrong answer is assuming every
+			// column present in the index (including the skipped middle
+			// column, event_type) serves as an index seek.
+			name:     "wrong: assumes the skipped middle column also seeks (D10 bug probe)",
+			response: `{"index_cond_column":"event_type","filter_only_column":"created_at"}`,
+			want:     0.5,
+		},
+		{
+			name:     "wrong: filter_only_column names the skipped middle column instead",
+			response: `{"index_cond_column":"tenant_id","filter_only_column":"event_type"}`,
+			want:     0.5,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

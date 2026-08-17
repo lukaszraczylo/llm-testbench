@@ -40,9 +40,9 @@ that fact.
 Three chunk-size options are available: 128 tokens, 512 tokens, and 2048
 tokens.
 
-Which of these is the smallest option that reliably holds a full 450-token
-fact without ever splitting it across two chunks? Respond with only a
-JSON object: {"chunk_size_tokens":128|512|2048}`
+Which of these is the smallest option large enough to contain a full
+450-token fact? Respond with only a JSON object:
+{"chunk_size_tokens":128|512|2048}`
 
 	return testkit.Test{
 		ID:          "rag-chunk-size-tradeoff",
@@ -62,14 +62,17 @@ JSON object: {"chunk_size_tokens":128|512|2048}`
 // candidates that retrieval already surfaced, so it must run second;
 // generation consumes the reranker's narrowed, reordered candidates last.
 func ragRerankerPlacementTest() testkit.Test {
+	// C4: the stages below are hand-shuffled to a different order than the
+	// correct pipeline order, so an echo of the presentation order does not
+	// score 1.0.
 	prompt := `A RAG pipeline has these three stages, listed here in no
 particular order:
+- generate: have the LLM produce the final answer using the selected
+  chunks as context.
 - retrieve: run a broad search (vector and/or keyword) over the index to
   produce an initial candidate set of chunks.
 - rerank: use a more expensive, more accurate model (e.g. a cross-encoder)
   to reorder a candidate set by relevance and narrow it to the best few.
-- generate: have the LLM produce the final answer using the selected
-  chunks as context.
 
 Give the correct pipeline order as a JSON array of the three stage names,
 e.g. ["a","b","c"]. Respond with only the JSON array.`
@@ -122,7 +125,7 @@ based)? Respond with only one word: keyword or semantic.`
 		Subcategory: "rag",
 		Description: "Identify keyword (exact-term) search as the method that fails on a synonym-only query/document pair.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("keyword"),
+		Eval:        eval.ExactToken("keyword"),
 	}
 }
 
@@ -137,8 +140,12 @@ the answer be traceable back to, and what must the system do instead of
 guessing when the retrieved context does not actually contain the
 information needed to answer the question?`
 
+	// C10: widen the traceability group beyond "cite"/"citation"/"source" -
+	// a response can correctly state the grounding requirement using
+	// "retrieved context"/"provided context"/"grounded"/"supported by"/
+	// "traceable" without ever using the word "cite" itself.
 	evaluator := eval.Mean(
-		eval.ContainsAny("cite", "citation", "source", "quote", "quoted"),
+		eval.ContainsAny("cite", "citation", "source", "quote", "quoted", "retrieved context", "provided context", "grounded", "supported by", "traceable"),
 		eval.ContainsAny("insufficient", "does not contain", "doesn't contain", "cannot answer", "can't answer", "no relevant", "unable to find", "not found in the context", "not present in the context"),
 	)
 
@@ -185,7 +192,7 @@ unused ("selective")? Respond with only one word: stuffed or selective.`
 		Subcategory: "rag",
 		Description: "Choose relevance-filtered ('selective') context assembly over budget-filling ('stuffed') given low-relevance chunks degrade quality.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("selective"),
+		Eval:        eval.ExactToken("selective"),
 	}
 }
 
@@ -284,15 +291,23 @@ specific problem in each scenario? Respond with only a JSON object:
 // unsupported claims can be flagged/removed, since flagging depends on
 // verification's result.
 func ragHallucinationMitigationOrderingTest() testkit.Test {
+	// C4: hand-shuffled to a different order than the correct answer, so an
+	// echo of the presentation order does not score 1.0. C8: step_instruct
+	// is reworded to make explicit that it embeds the ALREADY-RETRIEVED
+	// context into the assembled prompt, which forces instruct to run
+	// after retrieve (the original "instruct the model... to answer using
+	// only the retrieved context" wording was ambiguous about whether this
+	// was a static, retrieval-independent system instruction).
 	prompt := `A RAG pipeline's hallucination-mitigation steps are listed
 here, identified by id, in no particular order:
-- step_retrieve: retrieve grounding context relevant to the query.
-- step_instruct: instruct the model, in the prompt, to answer using only
-  the retrieved context and to cite it.
+- step_flag: flag or remove any claim that verification could not support.
 - step_generate: generate the answer.
+- step_retrieve: retrieve grounding context relevant to the query.
 - step_verify: verify each claim in the generated answer against the
   retrieved context.
-- step_flag: flag or remove any claim that verification could not support.
+- step_instruct: assemble the final prompt, embedding the retrieved
+  context together with the instruction to answer only from it and cite
+  it.
 
 Give the correct order these steps must run in, as a JSON array of their
 ids, e.g. ["step_a","step_b"]. Respond with only the JSON array.`
@@ -323,18 +338,22 @@ ids, e.g. ["step_a","step_b"]. Respond with only the JSON array.`
 // answer). frag_x (team headcount) answers a question never asked and
 // must be excluded.
 func ragMultihopDecompositionTest() testkit.Test {
+	// C4: hand-shuffled to a different order than the correct answer (the
+	// roster previously happened to already list the non-distractor
+	// fragments in the correct dependency order), so echoing the
+	// presentation order (minus frag_x) does not score 1.0.
 	prompt := `Multi-hop question: "What is the annual maintenance cost of
 the storage tier used by the database that backs the service which
 handles user authentication?"
 
 Candidate sub-question fragments, identified by id, in no particular
 order:
-- frag_q: "Which service handles user authentication?"
-- frag_p: "Which database backs that service?"
 - frag_s: "Which storage tier does that database use?"
-- frag_r: "What is the annual maintenance cost of that storage tier?"
 - frag_x: "What is the total headcount of the team that owns that
   service?"
+- frag_r: "What is the annual maintenance cost of that storage tier?"
+- frag_q: "Which service handles user authentication?"
+- frag_p: "Which database backs that service?"
 
 Exactly one of these fragments (frag_x) does not help answer the
 multi-hop question and must be excluded. Give the remaining fragments, in
@@ -363,8 +382,12 @@ the final context (rather than passing all 3 copies straight through to
 the LLM) matters: name what assembling all 3 copies wastes, and what
 problem it risks introducing into the generated answer.`
 
+	// CC4: widen the waste group with "tokens" (bare plural, not just
+	// "token budget"), "over-weight", and "dominat[e/ing/ion]" - a response
+	// can correctly describe the wasted-capacity consequence without using
+	// the word "budget"/"waste" specifically.
 	evaluator := eval.Mean(
-		eval.ContainsAny("token budget", "context window", "context budget", "waste", "wastes", "wasted"),
+		eval.ContainsAny("token budget", "context window", "context budget", "waste", "wastes", "wasted", "tokens", "over-weight", "dominat"),
 		eval.ContainsAny("redundant", "redundancy", "duplicate", "duplication", "repetition", "repetitive", "diversity", "biased", "bias", "skew"),
 	)
 

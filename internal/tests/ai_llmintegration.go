@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"fmt"
+
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
@@ -81,6 +83,15 @@ id: {"temperature":"...","max_tokens":"...","stop":"..."}`
 	}
 }
 
+// llmTokenBudgetMaxTokens and llmTokenBudgetThinkTokens are the parameters
+// for llmTokenBudgetReasoningTest, interpolated into the prompt (C14) so
+// the displayed values can never drift from what llmTokenBudgetReasoningWant
+// is actually computed from.
+const (
+	llmTokenBudgetMaxTokens   = 500
+	llmTokenBudgetThinkTokens = 437
+)
+
 // llmTokenBudgetReasoningWant is derived by plain subtraction, matching the
 // arithmetic ai_llmintegration_test.go independently recomputes.
 //
@@ -92,21 +103,22 @@ id: {"temperature":"...","max_tokens":"...","stop":"..."}`
 // than a small fixed cap. Here: max_tokens = 500, and the model's <think>
 // block consumes 437 completion tokens before the visible answer begins.
 // Tokens remaining for the visible answer = 500 - 437 = 63.
-const llmTokenBudgetReasoningWant = 500 - 437
+const llmTokenBudgetReasoningWant = llmTokenBudgetMaxTokens - llmTokenBudgetThinkTokens
 
 func llmTokenBudgetReasoningTest() testkit.Test {
-	prompt := `An OpenAI-compatible chat completion request sets
-max_tokens = 500. This caps the total number of completion tokens the
+	prompt := fmt.Sprintf(`An OpenAI-compatible chat completion request sets
+max_tokens = %d. This caps the total number of completion tokens the
 response may contain, counting every token the model generates: a
 reasoning model's hidden <think>...</think> content counts against this
 same budget before its visible answer, since both are completion tokens.
 
 For this request, the model's <think>...</think> block consumes exactly
-437 completion tokens before it begins writing its visible answer.
+%d completion tokens before it begins writing its visible answer.
 
 How many completion tokens remain in the max_tokens budget for the visible
 answer, once the <think> block has been generated? Respond with only the
-number.`
+number, with no commas, units, or other text (for example: 63).`,
+		llmTokenBudgetMaxTokens, llmTokenBudgetThinkTokens)
 
 	return testkit.Test{
 		ID:          "llm-token-budget-reasoning",
@@ -251,7 +263,7 @@ with only one word.`
 		Subcategory: "llm-integration",
 		Description: "Identify system (not user) as the role that carries a fixed, non-negotiable operating instruction.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("system"),
+		Eval:        eval.ExactToken("system"),
 	}
 }
 
@@ -309,9 +321,18 @@ final event? Respond with only that exact text, nothing else.`
 		Subcategory: "llm-integration",
 		Description: "Recall the exact [DONE] sentinel text of the final SSE event in an OpenAI-compatible stream.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("[DONE]"),
+		Eval:        eval.ExactToken("[DONE]"),
 	}
 }
+
+// llmEmbeddingBatchDocCount and llmEmbeddingBatchSize are the parameters
+// for llmEmbeddingBatchMathTest, interpolated into the prompt (C14) so the
+// displayed values can never drift from what llmEmbeddingBatchMathWant is
+// actually computed from.
+const (
+	llmEmbeddingBatchDocCount = 10000
+	llmEmbeddingBatchSize     = 96
+)
 
 // llmEmbeddingBatchMathWant is derived by calling aiCeilDiv, not
 // hardcoded.
@@ -319,16 +340,18 @@ final event? Respond with only that exact text, nothing else.`
 // ground truth: ceil(10000/96) - 96*104 = 9984, leaving 16 documents that
 // still need one more (partial) request, so 104 full batches plus 1
 // partial batch = 105 requests total.
-var llmEmbeddingBatchMathWant = aiCeilDiv(10000, 96)
+var llmEmbeddingBatchMathWant = aiCeilDiv(llmEmbeddingBatchDocCount, llmEmbeddingBatchSize)
 
 func llmEmbeddingBatchMathTest() testkit.Test {
-	prompt := `You must generate embeddings for 10,000 documents. The
-embeddings API accepts a maximum of 96 items per request, and every
+	prompt := fmt.Sprintf(`You must generate embeddings for %d documents. The
+embeddings API accepts a maximum of %d items per request, and every
 request you send should be as full as possible (maximally batched) to
 minimize the number of requests.
 
-How many API requests are needed in total to embed all 10,000 documents?
-Respond with only the number.`
+How many API requests are needed in total to embed all %d documents?
+Respond with only the number, with no commas, units, or other text (for
+example: 105).`,
+		llmEmbeddingBatchDocCount, llmEmbeddingBatchSize, llmEmbeddingBatchDocCount)
 
 	return testkit.Test{
 		ID:          "llm-embedding-batch-math",
@@ -364,6 +387,6 @@ client? Respond with only that exact returned text, nothing else.`
 		Subcategory: "llm-integration",
 		Description: "Trace the exact text an API returns when generation is cut by a stop=[\"\\n\\n\"] sequence, excluding the sequence itself.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("Answer: 42"),
+		Eval:        eval.ExactToken("Answer: 42"),
 	}
 }

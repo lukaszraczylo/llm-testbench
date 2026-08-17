@@ -235,6 +235,9 @@ func TestDelGitDetachedHeadRecoveryTest_Eval(t *testing.T) {
 		{name: "correct order different case", response: `["Branch","Checkout"]`, want: 1},
 		{name: "reversed order", response: `["checkout","branch"]`, want: 0},
 		{name: "wrong second subcommand", response: `["branch","switch"]`, want: 0},
+		{name: "single-command checkout -b is equally correct (D6)", response: `["checkout"]`, want: 1},
+		{name: "single-command switch -c is equally correct (D6)", response: `["switch"]`, want: 1},
+		{name: "bare branch alone leaves HEAD detached, not accepted (D6)", response: `["branch"]`, want: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

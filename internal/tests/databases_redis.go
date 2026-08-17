@@ -1,9 +1,7 @@
 package tests
 
 import (
-	"context"
 	"regexp"
-	"strings"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
@@ -12,7 +10,7 @@ import (
 // registerDBRedisTests registers every databases/redis test.
 func registerDBRedisTests(r *testkit.Registry) {
 	r.Register(dbRedisStructureChoiceTest())
-	r.Register(dbRedisTTLEvictionTest())
+	r.Register(dbRedisNoevictionWriteTest())
 	r.Register(dbRedisIncrAtomicityTest())
 	r.Register(dbRedisMultiVsPipelineTest())
 	r.Register(dbRedisScanVsKeysTest())
@@ -74,14 +72,14 @@ Respond with only a JSON object mapping each letter to one structure name:
 	}
 }
 
-// dbRedisTTLEvictionTest: determine what happens to a write under
+// dbRedisNoevictionWriteTest: determine what happens to a write under
 // maxmemory-policy=noeviction when Redis is already at maxmemory.
 //
 // ground truth: noeviction means Redis will never evict a key to make
 // room. A write that would grow memory usage while already at maxmemory
 // is instead rejected outright with an OOM error - the write does not
 // silently succeed and no key is evicted to make space.
-func dbRedisTTLEvictionTest() testkit.Test {
+func dbRedisNoevictionWriteTest() testkit.Test {
 	prompt := `A Redis instance has maxmemory-policy set to "noeviction" and
 is currently at maxmemory. A client sends a write command that would
 increase memory usage further.
@@ -89,12 +87,12 @@ increase memory usage further.
 What happens to that write? Respond with only one word: reject or evict.`
 
 	return testkit.Test{
-		ID:          "redis-ttl-eviction",
+		ID:          "redis-noeviction-write",
 		Category:    "databases",
 		Subcategory: "redis",
 		Description: "Determine that a write is rejected (not silently allowed, and nothing evicted) under maxmemory-policy=noeviction at maxmemory.",
 		Prompt:      prompt,
-		Eval:        dbExactAnswer("reject"),
+		Eval:        eval.ExactToken("reject"),
 	}
 }
 
@@ -157,7 +155,7 @@ pipelined commands? Respond with only "yes" or "no".`
 		Subcategory: "redis",
 		Description: "Confirm plain pipelining (unlike MULTI/EXEC) gives no guarantee against another client's commands interleaving.",
 		Prompt:      prompt,
-		Eval:        dbExactAnswer("no"),
+		Eval:        eval.ExactToken("no"),
 	}
 }
 
@@ -167,23 +165,9 @@ pipelined commands? Respond with only "yes" or "no".`
 // word "keys" elsewhere in prose ("the keys to fixing this...").
 var dbKeysCommandPattern = regexp.MustCompile("(?:`KEYS`|\\bKEYS\\s*\\*)")
 
-// dbNegationCuePattern matches a word that turns a mention of the KEYS
-// command into a warning against running it in production, rather than an
-// instruction to run it.
-var dbNegationCuePattern = regexp.MustCompile(`(?i)\b(don'?t|do not|never|avoid|instead of|not|shouldn'?t|should not|rather than|without|no need|danger|dangerous)\b`)
-
-// dbNegationWindow is how many characters before a KEYS-command mention
+// dbNegationWindow is how many characters around a KEYS-command mention
 // are searched for a negation cue.
 const dbNegationWindow = 60
-
-// dbNegationWindowStart returns the earliest byte offset in response to
-// search for a negation cue before a KEYS-command mention starting at
-// start: the current line, extended back at most dbNegationWindow
-// characters.
-func dbNegationWindowStart(response string, start int) int {
-	lineStart := strings.LastIndexByte(response[:start], '\n') + 1
-	return max(start-dbNegationWindow, lineStart)
-}
 
 // dbNoBareKeysInProd scores full credit unless the response instructs
 // running "KEYS *" against a production instance without any negating
@@ -191,26 +175,24 @@ func dbNegationWindowStart(response string, start int) int {
 // fine). This is deliberately not eval.NotContains, which would also zero
 // out the best possible answer: one that correctly explains why NOT to run
 // KEYS in production.
+//
+// Delegates to eval.NoUnnegatedMention (D5), the primitive shared with
+// kubernetes.go, security.go, and delivery_git.go's equivalent guards.
 func dbNoBareKeysInProd() eval.Evaluator {
-	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
-		matches := dbKeysCommandPattern.FindAllStringIndex(response, -1)
-		if len(matches) == 0 {
-			return eval.Score{Value: 1, Detail: "no mention of running the KEYS command"}
-		}
-		for _, loc := range matches {
-			start := loc[0]
-			windowStart := dbNegationWindowStart(response, start)
-			if !dbNegationCuePattern.MatchString(response[windowStart:start]) {
-				return eval.Score{Value: 0, Detail: "unnegated mention of running the KEYS command"}
-			}
-		}
-		return eval.Score{Value: 1, Detail: "every mention of KEYS is negated"}
-	})
+	return eval.NoUnnegatedMention(dbKeysCommandPattern, dbNegationWindow, nil)
 }
 
 // dbRedisScanVsKeysTest: require SCAN over KEYS for a hot-path production
 // lookup, using a negation-aware guard so an answer that correctly warns
 // against KEYS is not penalized for mentioning it.
+//
+// ground truth (DC9): KEYS * is an O(n) full-keyspace scan that blocks
+// Redis's single command-processing thread for its entire duration - on a
+// production instance holding millions of keys, called thousands of times
+// per second, this stalls every other client for the scan's whole
+// duration. SCAN instead walks the keyspace incrementally via a cursor,
+// returning a small batch per call and never blocking the server for more
+// than that batch, making it the safe hot-path replacement.
 func dbRedisScanVsKeysTest() testkit.Test {
 	prompt := `A request handler that runs thousands of times per second
 against a production Redis instance holding millions of keys currently
@@ -254,7 +236,7 @@ specific message it missed while disconnected? Respond with only "yes" or
 		Subcategory: "redis",
 		Description: "Confirm Redis pub/sub gives no delivery guarantee (no backlog/replay) to a subscriber that was disconnected when a message was published.",
 		Prompt:      prompt,
-		Eval:        dbExactAnswer("no"),
+		Eval:        eval.ExactToken("no"),
 	}
 }
 
@@ -266,9 +248,16 @@ specific message it missed while disconnected? Respond with only "yes" or
 // the server does not process any other client's command, so a script is
 // guaranteed to run start-to-finish with nothing interleaved.
 func dbRedisLuaAtomicityTest() testkit.Test {
-	prompt := `While one client's Lua script is executing via EVAL, can any
-other client's command run on the Redis server before that script
-finishes? Respond with only "yes" or "no".`
+	// DC6: narrowed to a data command (SET) specifically - "any other
+	// command whatsoever" is a broader claim than Redis's single-threaded
+	// script guarantee actually covers, since some non-data/administrative
+	// commands can be processed in certain configurations while a script
+	// runs. A data command like SET (one that reads/writes the keyspace)
+	// is unambiguously blocked, matching the ground truth exactly.
+	prompt := `While one client's Lua script is executing via EVAL, can
+another client's SET command (a data command touching the keyspace) run
+on the Redis server before that script finishes? Respond with only "yes"
+or "no".`
 
 	return testkit.Test{
 		ID:          "redis-lua-atomicity",
@@ -276,7 +265,7 @@ finishes? Respond with only "yes" or "no".`
 		Subcategory: "redis",
 		Description: "Confirm a Lua script run via EVAL executes atomically, with no other client command able to interleave.",
 		Prompt:      prompt,
-		Eval:        dbExactAnswer("no"),
+		Eval:        eval.ExactToken("no"),
 	}
 }
 

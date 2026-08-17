@@ -23,6 +23,11 @@ func TestLlmFieldSemanticsTest_Eval(t *testing.T) {
 			want:     1,
 		},
 		{
+			name:     "all correct, different spacing",
+			response: `{ "temperature": "sampling_randomness", "max_tokens": "completion_token_cap", "stop": "generation_end_strings" }`,
+			want:     1,
+		},
+		{
 			name:     "one wrong",
 			response: `{"temperature":"output_format","max_tokens":"completion_token_cap","stop":"generation_end_strings"}`,
 			want:     2.0 / 3.0,
@@ -65,6 +70,7 @@ func TestLlmTokenBudgetReasoningTest_Eval(t *testing.T) {
 	}{
 		{"exact", "63", 1},
 		{"prose wrapped", "63 completion tokens remain.", 1},
+		{"fenced", "```\n63\n```", 1},
 		{"wrong: forgot to subtract", "500", 0},
 		{"wrong: reported the reasoning tokens used, not remaining", "437", 0},
 	}
@@ -87,6 +93,7 @@ func TestLlm429RetryBackoffTest_Eval(t *testing.T) {
 	}{
 		{"all correct", `{"should_retry":"yes","wait_seconds":2}`, 1},
 		{"all correct fenced", "```json\n{\"should_retry\":\"yes\",\"wait_seconds\":2}\n```", 1},
+		{"all correct, different spacing", `{ "should_retry": "yes", "wait_seconds": 2 }`, 1},
 		{"wrong: should not retry", `{"should_retry":"no","wait_seconds":2}`, 0.5},
 		{"wrong: ignored Retry-After value", `{"should_retry":"yes","wait_seconds":30}`, 0.5},
 		{"both wrong", `{"should_retry":"no","wait_seconds":30}`, 0},
@@ -110,6 +117,7 @@ func TestLlmContextOverflowStrategyTest_Eval(t *testing.T) {
 	}{
 		{"correct: drop-oldest-turns", `{"strategy":"drop-oldest-turns"}`, 1},
 		{"correct, fenced with prose", "Given the no-altering constraint:\n```json\n{\"strategy\":\"drop-oldest-turns\"}\n```", 1},
+		{"correct, different spacing", `{ "strategy": "drop-oldest-turns" }`, 1},
 		{"wrong: summarize-oldest-turns", `{"strategy":"summarize-oldest-turns"}`, 0},
 		{"wrong: truncate-system-prompt", `{"strategy":"truncate-system-prompt"}`, 0},
 	}
@@ -132,6 +140,7 @@ func TestLlmToolCallHandlingTest_Eval(t *testing.T) {
 	}{
 		{"all correct", `{"next_role":"tool","id_field":"tool_call_id"}`, 1},
 		{"all correct fenced", "```json\n{\"next_role\":\"tool\",\"id_field\":\"tool_call_id\"}\n```", 1},
+		{"all correct, different spacing", `{ "next_role": "tool", "id_field": "tool_call_id" }`, 1},
 		{"wrong role", `{"next_role":"assistant","id_field":"tool_call_id"}`, 0.5},
 		{"wrong field", `{"next_role":"tool","id_field":"id"}`, 0.5},
 		{"both wrong", `{"next_role":"user","id_field":"call_id"}`, 0},
@@ -155,7 +164,9 @@ func TestLlmRolePlacementTest_Eval(t *testing.T) {
 	}{
 		{"correct: system", "system", 1},
 		{"correct, different case", "System", 1},
+		{"correct, quoted", `"system"`, 1},
 		{"wrong: user", "user", 0},
+		{"wrong: assistant", "assistant", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -180,6 +191,16 @@ func TestLlmTemperatureZeroCaveatTest_Eval(t *testing.T) {
 			want:     1,
 		},
 		{
+			name:     "both reasons present, alternate phrasing",
+			response: "Numerical precision in floating-point math is not associative, and the hardware kernel path a batched request is routed through can differ between calls.",
+			want:     1,
+		},
+		{
+			name:     "both reasons present, terse phrasing",
+			response: "Floating-point precision issues plus parallel execution batching on the GPU.",
+			want:     1,
+		},
+		{
 			name:     "only the numerical reason",
 			response: "It is because of floating point rounding differences.",
 			want:     0.5,
@@ -192,6 +213,11 @@ func TestLlmTemperatureZeroCaveatTest_Eval(t *testing.T) {
 		{
 			name:     "neither reason",
 			response: "The model just has some inherent randomness left even at temperature zero.",
+			want:     0,
+		},
+		{
+			name:     "neither reason, wrong explanation entirely",
+			response: "It happens because the random seed is not fixed across requests.",
 			want:     0,
 		},
 	}
@@ -255,6 +281,7 @@ func TestLlmEmbeddingBatchMathTest_Eval(t *testing.T) {
 	}{
 		{"exact", "105", 1},
 		{"prose wrapped", "You need 105 requests.", 1},
+		{"fenced", "```\n105\n```", 1},
 		{"wrong: dropped the partial batch", "104", 0},
 		{"wrong: off by a lot", "96", 0},
 	}
@@ -277,6 +304,7 @@ func TestLlmStopSequenceTraceTest_Eval(t *testing.T) {
 	}{
 		{"correct", "Answer: 42", 1},
 		{"correct with whitespace", "  Answer: 42  ", 1},
+		{"correct, quoted", `"Answer: 42"`, 1},
 		{"wrong: included text past the stop sequence", "Answer: 42\n\nExplanation: 6 times 7 is 42.", 0},
 		{"wrong: paraphrased instead of quoting exactly", "The answer is 42", 0},
 	}

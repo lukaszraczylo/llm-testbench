@@ -34,8 +34,8 @@ func TestRegisterSecurityTests_Wiring(t *testing.T) {
 		if tc.Description == "" {
 			t.Errorf("test %q: Description is empty", tc.ID)
 		}
-		if tc.MaxTokens < 0 {
-			t.Errorf("test %q: MaxTokens = %d, want >= 0", tc.ID, tc.MaxTokens)
+		if tc.MaxTokens != 0 {
+			t.Errorf("test %q: MaxTokens = %d, want 0 (omitted, per round-2 rule 7)", tc.ID, tc.MaxTokens)
 		}
 		counts[tc.Subcategory]++
 	}

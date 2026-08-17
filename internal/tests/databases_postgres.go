@@ -219,10 +219,19 @@ acquisition order (by id, ascending) would both transactions need to follow
 to prevent this deadlock? Respond with only a JSON object:
 {"deadlock":true|false,"safe_order_ids":[<first id to lock>,<second id to lock>]}`
 
-	evaluator := eval.Mean(
-		eval.JSONField("deadlock", true),
-		eval.JSONField("safe_order_ids[0]", 1),
-		eval.JSONField("safe_order_ids[1]", 2),
+	// D9: weight the deadlock-diagnosis boolean 3x the safe-order answer,
+	// so getting the core yes/no diagnosis right dominates the score more
+	// than the specific ordering of an already-correct diagnosis. The two
+	// safe_order_ids indices are grouped into one combined "order" share
+	// (an equal-weighted Mean of the two), not two separate top-level
+	// terms, so the 3:1 ratio holds between "diagnosis" and "order" as
+	// conceptual units, not among three arbitrary equal terms.
+	evaluator := eval.All(
+		eval.W(eval.JSONField("deadlock", true), 3),
+		eval.W(eval.Mean(
+			eval.JSONField("safe_order_ids[0]", 1),
+			eval.JSONField("safe_order_ids[1]", 2),
+		), 1),
 	)
 
 	return testkit.Test{
@@ -235,9 +244,9 @@ to prevent this deadlock? Respond with only a JSON object:
 	}
 }
 
-// dbPGReplicaFailoverTest: explain that an asynchronously-replicated commit
-// can be lost when the primary crashes before the replica catches up and
-// gets promoted.
+// dbPGReplicaFailoverTest: identify that an asynchronously-replicated
+// commit is NOT guaranteed visible when the primary crashes before the
+// replica catches up and gets promoted.
 //
 // ground truth: with asynchronous streaming replication (no
 // synchronous_commit), a transaction's COMMIT returns to the client as
@@ -247,6 +256,14 @@ to prevent this deadlock? Respond with only a JSON object:
 // without ever having applied that transaction's WAL - so the committed
 // transaction is not visible on it and is effectively lost, unless it can
 // be recovered from the old primary's WAL after the fact.
+//
+// D2: redesigned from a free-text ContainsAny("lost", ...) check to a
+// forced-vocabulary JSON boolean + reason, since "lost"/"data loss" as a
+// bare substring search matched its own exact negation - a response
+// stating "nothing is lost" or "no data loss occurs" contains the literal
+// substring "lost"/"data loss" and was wrongly scored 1.0 for asserting
+// the opposite of the correct answer. A forced true/false field cannot be
+// polarity-confused this way.
 func dbPGReplicaFailoverTest() testkit.Test {
 	prompt := `A Postgres primary has one streaming replica, using
 asynchronous replication (synchronous_commit is not enabled). A client's
@@ -255,19 +272,19 @@ commit reaches the replica, the primary host crashes, and the replica is
 promoted to become the new primary.
 
 Is that committed transaction guaranteed to be visible on the newly
-promoted primary? Explain what happens to it and why, in one or two
-sentences.`
+promoted primary? Respond with only a JSON object:
+{"guaranteed_visible":true|false,"reason":"<one of: async-wal-not-replicated, sync-replication-guarantees-durability, replica-storage-corrupted>"}`
 
 	evaluator := eval.All(
-		eval.W(eval.ContainsAny("lost", "not visible", "not guaranteed", "may be lost", "can be lost", "data loss"), 2),
-		eval.W(eval.ContainsAny("async", "asynchronous"), 1),
+		eval.W(eval.JSONField("guaranteed_visible", false), 3),
+		eval.W(eval.JSONField("reason", "async-wal-not-replicated"), 2),
 	)
 
 	return testkit.Test{
 		ID:          "pg-replica-failover",
 		Category:    "databases",
 		Subcategory: "postgres",
-		Description: "Explain that an asynchronously-replicated commit can be lost on failover if the primary crashes before the replica catches up.",
+		Description: "Identify that an asynchronously-replicated commit is not guaranteed visible on failover if the primary crashes before the replica catches up.",
 		Prompt:      prompt,
 		Eval:        evaluator,
 	}

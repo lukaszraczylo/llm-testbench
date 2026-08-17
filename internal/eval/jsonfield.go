@@ -89,9 +89,9 @@ func jsonValueAs[T comparable](v any) (T, error) {
 		}
 		return any(s).(T), nil
 	case bool:
-		b, ok := v.(bool)
-		if !ok {
-			return zero, fmt.Errorf("expected bool, got %T (%v)", v, v)
+		b, err := asBool(v)
+		if err != nil {
+			return zero, err
 		}
 		return any(b).(T), nil
 	case float64:
@@ -131,6 +131,30 @@ func asFloat64(v any) (float64, error) {
 		return f, nil
 	default:
 		return 0, fmt.Errorf("expected number, got %T (%v)", v, v)
+	}
+}
+
+// asBool coerces a decoded JSON value to bool. A string is accepted too
+// (DC2, mirroring asFloat64's B9 numeric-string coercion), case-insensitive
+// and trimmed: a model that answers {"guaranteed_visible":"false"} instead
+// of {"guaranteed_visible":false} - both are the same value, and the
+// prompt asked for a JSON field, not a JSON type - must not score 0 for a
+// mechanical typing difference. Any other string fails.
+func asBool(v any) (bool, error) {
+	switch b := v.(type) {
+	case bool:
+		return b, nil
+	case string:
+		switch strings.ToLower(strings.TrimSpace(b)) {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		default:
+			return false, fmt.Errorf("expected bool, got non-boolean string %q", b)
+		}
+	default:
+		return false, fmt.Errorf("expected bool, got %T (%v)", v, v)
 	}
 }
 
@@ -193,7 +217,17 @@ func (j jsonFieldEval[T]) Evaluate(_ context.Context, response string) Score {
 func equalJSONValue[T comparable](got, want T) bool {
 	if gs, ok := any(got).(string); ok {
 		ws := any(want).(string)
-		return strings.EqualFold(strings.TrimSpace(gs), strings.TrimSpace(ws))
+		return strings.EqualFold(enumNormalize(gs), enumNormalize(ws))
 	}
 	return got == want
+}
+
+// enumNormalize folds hyphens to spaces and collapses repeated whitespace
+// (DC4), so a closed-vocabulary enum answer like "non-repeatable-read" and
+// "non repeatable read" compare equal: a model choosing its own spelling
+// of a multi-word enum token should not be marked wrong for a formatting
+// difference the prompt's closed vocabulary did not unambiguously specify.
+func enumNormalize(s string) string {
+	s = strings.ReplaceAll(s, "-", " ")
+	return strings.Join(strings.Fields(s), " ")
 }

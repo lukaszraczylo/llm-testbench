@@ -85,12 +85,21 @@ with only the exact command line, nothing else.`
 		Subcategory: "containers",
 		Description: "Trace ENTRYPOINT+CMD exec-form interaction to the exact resulting startup command line.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("python3 app.py --port 8080"),
+		Eval:        eval.ExactToken("python3 app.py --port 8080"),
 	}
 }
 
 // delDockerMultistageSizeBenefitTest: explain how a multi-stage build
 // shrinks the final image and name a minimal final-stage base.
+//
+// ground truth (DC9): a multi-stage build compiles in one stage (here the
+// full "golang:1.25" toolchain image) and copies only the compiled binary
+// artifact into a separate final stage, whose base image never needs the
+// compiler, package caches, or any other build-time tooling. Discarding
+// the build stage's layers from the shipped image (by starting the final
+// stage from a minimal base - scratch, distroless, or alpine - rather than
+// continuing to build image) is what drops the image from over 900MB to a
+// small final size.
 func delDockerMultistageSizeBenefitTest() testkit.Test {
 	prompt := `A Go service's Dockerfile currently uses a single
 "golang:1.25" base image (full Go toolchain, apt package caches, and build
@@ -99,8 +108,13 @@ over 900MB. Explain how switching to a multi-stage build reduces the final
 image size, and name the kind of minimal base image you would copy the
 compiled binary into for the final stage.`
 
+	// D8: require the actual multi-stage build artifact (COPY --from, or
+	// naming the build/final stage split), not just the bare word
+	// "multi-stage" - a response could say "multi-stage" in passing
+	// without demonstrating it understands the mechanism that actually
+	// drops the toolchain layer.
 	evaluator := eval.All(
-		eval.W(eval.ContainsAll("multi-stage"), 2),
+		eval.W(eval.ContainsAny("multi-stage", "COPY --from", "final stage", "build stage"), 2),
 		eval.W(eval.ContainsAny("scratch", "distroless", "alpine"), 2),
 	)
 
@@ -136,7 +150,8 @@ Final stage (this is what actually ships): base image alpine at 8MB, plus a
 COPY of the compiled binary from the build stage adds 22MB.
 
 What is the total size, in MB, of the final shipped image? Respond with
-only the number.`
+only the number, digits only, with no commas, units, or other text (for
+example: 30).`
 
 	return testkit.Test{
 		ID:          "docker-image-size-math",
@@ -165,8 +180,12 @@ instruction that makes the container run as a non-root user, and name the
 Linux capability set it should end up running with at runtime, given it
 needs no special privileges.`
 
+	// D8: bare "USER" is a common English word (the response could say
+	// "the user experience" and still match) - require the actual USER
+	// instruction artifact (a concrete non-root UID/username, or the
+	// adduser/useradd command that creates one) instead.
 	evaluator := eval.All(
-		eval.W(eval.ContainsAll("USER"), 2),
+		eval.W(eval.ContainsAny("USER 1000", "USER app", "USER nonroot", "adduser", "useradd"), 2),
 		eval.W(eval.ContainsAny("cap-drop=all", "cap-drop all", "drop all capabilities", "capdrop=all", "drop all"), 2),
 	)
 
@@ -188,6 +207,15 @@ var delDockerHealthcheckRetriesWant = 3
 
 // delDockerHealthcheckSemanticsTest: read the HEALTHCHECK retries value
 // correctly rather than the interval or timeout values.
+//
+// ground truth (DC9): Docker's HEALTHCHECK instruction's three timing
+// flags each control a different thing - --interval is the time between
+// probe runs, --timeout is how long a single probe may take before it
+// counts as failed, and --retries is the number of CONSECUTIVE failed
+// probes required before Docker flips the container's health status to
+// "unhealthy". The instruction here sets --retries=3, so exactly 3
+// consecutive failures (not --interval's 30 or --timeout's 3-with-a-unit)
+// is the answer.
 func delDockerHealthcheckSemanticsTest() testkit.Test {
 	prompt := `Given this Dockerfile instruction:
 
@@ -330,22 +358,35 @@ Respond with only a JSON object:
 
 // delDockerLayerCountDockerfile is the inline numbered Dockerfile for
 // delDockerLayerCountTest.
+//
+// D1: this fixture previously included a "WORKDIR /app" line and claimed
+// WORKDIR was metadata-only, matching a widely-repeated but factually
+// wrong claim. Verified empirically on this machine (both BuildKit and,
+// separately, `docker inspect` layer counts) that WORKDIR DOES create a
+// real new filesystem layer: building the equivalent Dockerfile WITH a
+// WORKDIR line yields 3 new layers over the alpine:3.20 base, not 2.
+// WORKDIR is dropped from this fixture entirely (rather than trying to
+// special-case it) so the only layer-creating instructions present are the
+// uncontested ones (RUN/COPY), keeping want=2 unambiguous.
+// delivery_containers_test.go's TestDelDockerLayerCountWant_GroundTruth
+// verifies this exact fixture by actually building it with docker,
+// skipping if docker is unavailable.
 const delDockerLayerCountDockerfile = `1: FROM alpine:3.20
-2: WORKDIR /app
-3: COPY app /app/app
-4: RUN chmod +x /app/app
-5: ENV PORT=8080
-6: EXPOSE 8080
-7: USER 1000
-8: ENTRYPOINT ["/app/app"]`
+2: COPY app /app/app
+3: RUN chmod +x /app/app
+4: ENV PORT=8080
+5: EXPOSE 8080
+6: USER 1000
+7: ENTRYPOINT ["/app/app"]`
 
 // delDockerLayerCountWant is the number of new filesystem layers this
 // Dockerfile adds on top of its base image.
 //
 // ground truth: only RUN, COPY, and ADD instructions create a new
-// filesystem layer; WORKDIR, ENV, EXPOSE, USER, ENTRYPOINT, CMD, and LABEL
-// only update image metadata/config and add no layer. This Dockerfile has
-// exactly one COPY (line 3) and one RUN (line 4): 2 new layers.
+// filesystem layer; ENV, EXPOSE, USER, ENTRYPOINT, CMD, and LABEL only
+// update image metadata/config and add no layer (WORKDIR is NOT in this
+// metadata-only list - see the fixture comment above). This Dockerfile has
+// exactly one COPY (line 2) and one RUN (line 3): 2 new layers.
 var delDockerLayerCountWant = 2
 
 // delDockerLayerCountTest: count only the new filesystem layers a

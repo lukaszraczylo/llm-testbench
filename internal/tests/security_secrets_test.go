@@ -62,6 +62,14 @@ func TestSecRemediationOrderTest_Eval(t *testing.T) {
 			response: `["rewrite-git-history-to-purge-it","rotate-the-leaked-credential","remove-secret-from-current-code","force-push-and-notify-collaborators"]`,
 			want:     0,
 		},
+		{
+			// C4 bug probe: the prompt's presented list is hand-shuffled to
+			// a different order than the correct answer, so echoing the
+			// prompt's own list order must score 0.
+			name:     "wrong: echoes the prompt's shuffled presentation order verbatim (C4 bug probe)",
+			response: `["force-push-and-notify-collaborators","remove-secret-from-current-code","rotate-the-leaked-credential","rewrite-git-history-to-purge-it"]`,
+			want:     0,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -152,6 +160,14 @@ func TestSecRotationNoDowntimeTest_Eval(t *testing.T) {
 		{
 			name:     "wrong: revokes old credential before the rollout finishes",
 			response: `["create-new-credential-alongside-old","revoke-old-credential","deploy-config-with-new-credential-to-all-replicas","verify-all-replicas-using-new-credential"]`,
+			want:     0,
+		},
+		{
+			// C4 bug probe: the prompt's presented list is hand-shuffled to
+			// a different order than the correct answer, so echoing the
+			// prompt's own list order must score 0.
+			name:     "wrong: echoes the prompt's shuffled presentation order verbatim (C4 bug probe)",
+			response: `["verify-all-replicas-using-new-credential","revoke-old-credential","create-new-credential-alongside-old","deploy-config-with-new-credential-to-all-replicas"]`,
 			want:     0,
 		},
 	}

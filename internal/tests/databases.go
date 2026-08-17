@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
@@ -21,28 +20,6 @@ func registerDatabasesTests(r *testkit.Registry) {
 	registerDBPostgresTests(r)
 	registerDBRedisTests(r)
 	registerDBSQLTuningTests(r)
-}
-
-// dbExactAnswer returns an Evaluator awarding full credit when the
-// response, trimmed of whitespace, at most one layer of surrounding quote
-// characters (' , ", or `), and a single trailing sentence-ending period,
-// equals want case-insensitively. Used across the databases category for
-// prompts that force a single short forced-vocabulary answer (e.g. "yes"
-// or "no", "keyset" or "offset"): it accepts every materially-correct form
-// of that answer (bare, quoted, differently-cased, or with trailing
-// punctuation) without loosening the match to accept a wrong answer.
-func dbExactAnswer(want string) eval.Evaluator {
-	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
-		got := strings.TrimSpace(response)
-		got = strings.Trim(got, "\"'`")
-		got = strings.TrimSuffix(strings.TrimSpace(got), ".")
-		got = strings.TrimSpace(got)
-		wantTrimmed := strings.TrimSpace(want)
-		if strings.EqualFold(got, wantTrimmed) {
-			return eval.Score{Value: 1, Detail: fmt.Sprintf("equals %q", wantTrimmed)}
-		}
-		return eval.Score{Value: 0, Detail: fmt.Sprintf("got %q, want %q", got, wantTrimmed)}
-	})
 }
 
 // dbJSONArrayLength returns an Evaluator awarding full credit when the

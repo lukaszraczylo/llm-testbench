@@ -38,6 +38,21 @@ func TestSecPasswordHashChoiceTest_Eval(t *testing.T) {
 			response: "Store passwords hashed with MD5 for speed.",
 			want:     0,
 		},
+		{
+			// C11 bug probe: naming a weak hash while recommending it
+			// (not warning against it) must not earn any credit for
+			// "naming" the discouraged term - the naming credit is folded
+			// into the same AND as the negation check, not an independent
+			// term.
+			name:     "wrong: names SHA-256 by name but still recommends it (C11 bug probe)",
+			response: "SHA-256 is a fine choice for hashing user passwords.",
+			want:     0,
+		},
+		{
+			name:     "wrong: warns against a hash never actually named by name (C11 bug probe)",
+			response: "Use bcrypt, and avoid weak, fast, general-purpose hashing algorithms for passwords.",
+			want:     0.5,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,8 +83,18 @@ func TestSecConstantTimeCompareTest_Eval(t *testing.T) {
 			want:     1,
 		},
 		{
-			name:     "correct: constant-time phrasing, ConstantTimeCompare",
+			// CC1: "constant-time" describes the FIX, not the defect - a
+			// response that only ever says "constant-time" (never "timing
+			// attack"/"timing side channel"/"time-based") does not
+			// independently name the defect class the prompt asks for, so
+			// this now earns only the fix-group's credit, not both.
+			name:     "partial: only fix-side 'constant-time' phrasing, never names the defect class (CC1)",
 			response: "Comparing with == leaks timing information (constant-time is required). Use crypto/subtle's ConstantTimeCompare function.",
+			want:     0.5,
+		},
+		{
+			name:     "correct: names the defect AND uses 'constant-time' for the fix (CC1 bug probe)",
+			response: "This is a timing attack. Fix it by doing a constant-time comparison via crypto/subtle.",
 			want:     1,
 		},
 		{
@@ -127,7 +152,36 @@ func TestSecTLSFloorVersionTest_Eval(t *testing.T) {
 	}{
 		{name: "correct bare", response: "1.2", want: 1},
 		{name: "correct with TLS prefix", response: "TLS 1.2", want: 1},
-		{name: "correct in a sentence", response: "The minimum should be 1.2.", want: 1},
+		{name: "correct with trailing period", response: "1.2.", want: 1},
+		{
+			// C1: "TLSv1.2" (no space) has no word boundary between "v"
+			// and "1" - a plain \b1\.2\b regex rejected it. The
+			// normalize-then-strip-prefix design correctly accepts it.
+			name:     "correct: TLSv prefix with no space (C1 bug probe)",
+			response: "TLSv1.2",
+			want:     1,
+		},
+		{
+			// This response is no longer accepted (C1): the prompt asks to
+			// "respond with only the version number", and a full
+			// sentence-wrapped answer is the same category of over-permissive
+			// substring match that let "TLS 1.3 only; 1.2 is legacy" (below)
+			// wrongly score 1 under the old \b1\.2\b substring search -
+			// consistent with how every other eval.ExactToken-style forced
+			// single-token test in this codebase treats full-sentence
+			// wrapping.
+			name:     "wrong: sentence-wrapped, not a bare/quoted/fenced token",
+			response: "The minimum should be 1.2.",
+			want:     0,
+		},
+		{
+			// C1 bug probe: the actual chosen floor is 1.3, but the old
+			// substring search matched "1.2" anyway because it appears
+			// later in the same response, in an unrelated aside.
+			name:     "wrong: chooses 1.3 but mentions 1.2 in an aside (C1 bug probe)",
+			response: "TLS 1.3 only; 1.2 is legacy.",
+			want:     0,
+		},
 		{name: "wrong: TLS 1.3", response: "1.3", want: 0},
 		{name: "wrong: TLS 1.0", response: "1.0", want: 0},
 	}
@@ -173,6 +227,19 @@ func TestSecAESGCMNonceReuseTest_Eval(t *testing.T) {
 			name:     "wrong: irrelevant fix suggested",
 			response: "Just use a bigger nonce size.",
 			want:     0,
+		},
+		{
+			// CC2 bug probe: bare "authentication" (with no forge/forgery/
+			// keystream/auth-tag consequence term) no longer triggers the
+			// defect-naming group on its own.
+			name:     "wrong: bare 'authentication' mention with no actual consequence term (CC2 bug probe)",
+			response: "This affects authentication somehow. Use a fresh random nonce per encryption.",
+			want:     0.5,
+		},
+		{
+			name:     "correct: specific 'auth tag' consequence term (CC2 bug probe)",
+			response: "The auth tag can be forged if the nonce repeats. Use a fresh random nonce per encryption.",
+			want:     1,
 		},
 	}
 	for _, tt := range tests {
@@ -262,6 +329,14 @@ func TestSecRotateOrderTest_Eval(t *testing.T) {
 			response: `["add-new-key-to-verify-set","remove-old-key-from-verify-set","start-signing-with-new-key","wait-for-old-tokens-to-expire"]`,
 			want:     0,
 		},
+		{
+			// C4 bug probe: the prompt's presented list is now
+			// hand-shuffled to a different order than the correct answer,
+			// so an echo of the prompt's own list order must score 0, not 1.
+			name:     "wrong: echoes the prompt's shuffled presentation order verbatim (C4 bug probe)",
+			response: `["remove-old-key-from-verify-set","add-new-key-to-verify-set","wait-for-old-tokens-to-expire","start-signing-with-new-key"]`,
+			want:     0,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -308,6 +383,11 @@ func TestSecCertChainValidationTest_Eval(t *testing.T) {
 		{name: "correct hyphenated", response: "man-in-the-middle", want: 1},
 		{name: "correct spaced in a sentence", response: "This exposes the client to a man in the middle attack.", want: 1},
 		{name: "correct capitalized", response: "MITM stands for Man-In-The-Middle, which is the attack here.", want: 1},
+		{name: "correct: bare MITM abbreviation (C6 bug probe)", response: "MITM", want: 1},
+		{name: "correct: AiTM abbreviation (C6 bug probe)", response: "AiTM (adversary-in-the-middle)", want: 1},
+		{name: "correct: on-path attacker (C6 bug probe)", response: "This is an on-path attacker.", want: 1},
+		{name: "correct: adversary-in-the-middle phrasing (C6 bug probe)", response: "adversary-in-the-middle", want: 1},
+		{name: "correct: machine-in-the-middle phrasing (C6 bug probe)", response: "machine-in-the-middle", want: 1},
 		{name: "wrong: replay attack", response: "replay attack", want: 0},
 		{name: "wrong: denial of service", response: "denial of service", want: 0},
 	}

@@ -230,6 +230,14 @@ func TestSecInputValidationBoundaryTest_Eval(t *testing.T) {
 			response: "Reject negative quantities.",
 			want:     0.5,
 		},
+		{
+			// CC3 bug probe: a concrete numeric range is an equally valid,
+			// even more specific upper-bound answer, even without any of
+			// the generic upper-bound words.
+			name:     "correct: concrete numeric range instead of generic upper-bound words (CC3 bug probe)",
+			response: "Reject quantity <= 0, and only accept a range of 1..10000.",
+			want:     1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
