@@ -9,13 +9,11 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/config"
 	"github.com/lukaszraczylo/llm-testbench/internal/llm"
 	"github.com/lukaszraczylo/llm-testbench/internal/report"
 	"github.com/lukaszraczylo/llm-testbench/internal/runner"
-	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 	"github.com/lukaszraczylo/llm-testbench/internal/tests"
 )
 
@@ -100,7 +98,7 @@ func runCommand(args []string) error {
 	format := fs.String("format", "table", "output format: table|markdown|json")
 	concurrency := fs.Int("concurrency", 0, "override config's concurrency (0 = use config)")
 	timeout := fs.Duration("timeout", 0, "override config's request_timeout (0 = use config)")
-	verbose := fs.Bool("verbose", false, "print progress to stderr as tests complete")
+	quiet := fs.Bool("quiet", false, "suppress progress output on stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -133,14 +131,20 @@ func runCommand(args []string) error {
 		return fmt.Errorf("no tests matched category=%q subcategory=%q", shared.category, shared.subcategory)
 	}
 
+	var reporter runner.ProgressReporter = runner.NoopProgressReporter{}
+	if !*quiet {
+		reporter = newStderrProgressReporter(os.Stderr)
+	}
+
 	r := runner.New(client, runner.Config{
 		Concurrency:      conc,
 		Temperature:      requestTemperature,
 		MaxTokensDefault: cfg.MaxTokensDefault,
+		Reporter:         reporter,
 	})
 
 	ctx := context.Background()
-	results := runWithProgress(ctx, r, models, selected, *verbose)
+	results := r.Run(ctx, models, selected)
 
 	f, err := validateFormat(*format)
 	if err != nil {
@@ -161,30 +165,6 @@ func validateFormat(format string) (report.Format, error) {
 	default:
 		return "", fmt.Errorf("unknown format %q (want table|markdown|json)", format)
 	}
-}
-
-// runWithProgress runs the given tests/models and, when verbose, prints one
-// progress line per completed (model, test) pair to stderr.
-func runWithProgress(ctx context.Context, r *runner.Runner, models []string, selected []testkit.Test, verbose bool) []runner.Result {
-	if !verbose {
-		return r.Run(ctx, models, selected)
-	}
-
-	fmt.Fprintf(os.Stderr, "running %d tests x %d models = %d calls...\n", len(selected), len(models), len(selected)*len(models))
-	start := time.Now()
-	results := r.Run(ctx, models, selected)
-	for _, res := range results {
-		status := fmt.Sprintf("%.2f", res.Score.Value)
-		switch {
-		case res.Err != nil:
-			status = "ERR: " + res.Err.Error()
-		case res.Score.Skipped:
-			status = "skip: " + res.Score.Detail
-		}
-		fmt.Fprintf(os.Stderr, "  %-14s %-28s %s (%s)\n", res.Model, res.TestID, status, res.Latency)
-	}
-	fmt.Fprintf(os.Stderr, "done in %s\n", time.Since(start))
-	return results
 }
 
 func splitCSV(s string) []string {

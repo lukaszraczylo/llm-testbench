@@ -17,12 +17,15 @@ type jsonResult struct {
 	Subcategory      string  `json:"subcategory,omitempty"`
 	Detail           string  `json:"detail,omitempty"`
 	Error            string  `json:"error,omitempty"`
+	ResponseText     string  `json:"response_text"`
+	FinishReason     string  `json:"finish_reason,omitempty"`
 	Score            float64 `json:"score"`
 	LatencyMS        int64   `json:"latency_ms"`
 	PromptTokens     int     `json:"prompt_tokens"`
 	CompletionTokens int     `json:"completion_tokens"`
 	Tokens           int     `json:"tokens"`
 	Skipped          bool    `json:"skipped"`
+	Truncated        bool    `json:"truncated"`
 }
 
 // renderJSON dumps raw results as a JSON array, joined with test metadata.
@@ -42,7 +45,10 @@ func renderJSON(w io.Writer, tests []testkit.Test, results []runner.Result) erro
 			Subcategory:      t.Subcategory,
 			Score:            r.Score.Value,
 			Detail:           r.Score.Detail,
+			ResponseText:     r.ResponseText,
+			FinishReason:     r.FinishReason,
 			Skipped:          r.Score.Skipped,
+			Truncated:        r.Truncated(),
 			LatencyMS:        r.Latency.Milliseconds(),
 			PromptTokens:     r.PromptTokens,
 			CompletionTokens: r.CompletionTokens,

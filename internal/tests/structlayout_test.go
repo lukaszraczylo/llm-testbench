@@ -95,6 +95,48 @@ func TestGoStructAlignEval_AllFourMinimalOrdersScoreFull(t *testing.T) {
 	}
 }
 
+// TestGoStructAlignEval_TrailingCommentsAndTags is the 5c regression: a
+// field line may carry a trailing "// comment" explaining the model's
+// reasoning, and/or a Go struct tag, without breaking field extraction.
+func TestGoStructAlignEval_TrailingCommentsAndTags(t *testing.T) {
+	e := goStructAlignEval()
+
+	tests := []struct {
+		name     string
+		response string
+		want     float64
+	}{
+		{
+			name:     "trailing comment on every field",
+			response: "```go\ntype Task struct {\n\tName     string // 16 bytes\n\tID       int64  // 8 bytes\n\tPriority int32  // 4 bytes\n\tActive   bool   // 1 byte\n\tFlag     byte   // 1 byte\n}\n```",
+			want:     1,
+		},
+		{
+			name:     "struct tag with no comment",
+			response: "```go\ntype Task struct {\n\tName     string `json:\"name\"`\n\tID       int64  `json:\"id\"`\n\tPriority int32  `json:\"priority\"`\n\tActive   bool   `json:\"active\"`\n\tFlag     byte   `json:\"flag\"`\n}\n```",
+			want:     1,
+		},
+		{
+			name:     "struct tag followed by a comment",
+			response: "```go\ntype Task struct {\n\tName     string `json:\"name\"` // 16 bytes\n\tID       int64  `json:\"id\"`\n\tPriority int32  `json:\"priority\"`\n\tActive   bool   `json:\"active\"`\n\tFlag     byte   `json:\"flag\"`\n}\n```",
+			want:     1,
+		},
+		{
+			name:     "wasteful order with comments still scores 0",
+			response: "```go\ntype Task struct {\n\tActive   bool   // 1 byte\n\tID       int64  // 8 bytes\n\tPriority int32  // 4 bytes\n\tName     string // 16 bytes\n\tFlag     byte   // 1 byte\n}\n```",
+			want:     0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := e.Evaluate(context.Background(), tt.response)
+			if got.Value != tt.want {
+				t.Errorf("Evaluate() = %v, want %v (detail: %s)", got.Value, tt.want, got.Detail)
+			}
+		})
+	}
+}
+
 func TestGoStructAlignEval_RejectsBadResponses(t *testing.T) {
 	e := goStructAlignEval()
 

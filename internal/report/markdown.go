@@ -20,13 +20,19 @@ func renderMarkdown(w io.Writer, tests []testkit.Test, models []string, results 
 	ew.println()
 	scoreHeader := append([]string{"Test", "Category", "Subcategory"}, models...)
 	writeMarkdownHeader(ew, scoreHeader)
+	anyTruncated := false
 	for _, t := range sortedTests(tests) {
 		row := []string{t.ID, t.Category, t.Subcategory}
 		for _, model := range models {
 			r, ok := idx[t.ID][model]
 			row = append(row, cellText(r, ok))
+			anyTruncated = anyTruncated || r.Truncated()
 		}
 		writeMarkdownRow(ew, row)
+	}
+	if anyTruncated {
+		ew.println()
+		ew.println(truncatedLegend)
 	}
 
 	ew.println()

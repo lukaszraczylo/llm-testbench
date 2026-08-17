@@ -67,7 +67,25 @@ Both `list` and `run` accept:
 - `--concurrency` - override the config file's `concurrency`.
 - `--timeout` - override the config file's `request_timeout` (for example
   `60s`).
-- `--verbose` - print one progress line per completed test to stderr.
+- `--quiet` - suppress progress output on stderr. Progress is on by
+  default: a run can issue hundreds of requests at 30-50s each, and a
+  silent CLI reads as a hang.
+
+By default, `run` prints one line to stderr at the start ("running N tests
+x M models = K requests, concurrency C") and one line per completed
+request ("[done/total] model=... test=... score=... tokens=... (latency)",
+with a `TRUNCATED` marker when a response was cut off by the token
+budget). stdout carries only the table/markdown/json report, so `llmtest
+run --format json > results.json` stays pipeable regardless of `--quiet`.
+
+If `config.yaml` omits `concurrency`, `request_timeout`, or
+`max_tokens_default`, `internal/config` fills in `8`, `300s`, and `12000`.
+The effective per-call token budget is `max(test.MaxTokens,
+max_tokens_default)`: a test's own `MaxTokens` can only raise the budget
+above the config default, never lower it below it. This matters for
+reasoning models, which can spend thousands of completion tokens on
+`reasoning_content` before writing an answer to `content`; a low budget
+truncates the answer before the model reaches it.
 
 ### Output
 
@@ -89,6 +107,17 @@ a non-2xx response after retries), and `skip` when the test's evaluator
 needs a local toolchain that is not installed (for example, a Python
 exec-evaluator when `python3` is missing). Skipped tests are excluded from
 every mean.
+
+A cell carries a trailing `!` when the model's response was cut off by the
+token budget (`finish_reason=length`) - for example `0.00 (6000tok)!`. A
+truncated response's score is still whatever the evaluator computed on the
+partial text, so a `!` cell needs a closer look: raise
+`max_tokens_default` and re-run. `table` and `markdown` print a one-line
+legend explaining `!` whenever at least one cell has it. `json` carries the
+same signal per result as `"truncated": true`, plus `"finish_reason"` and
+`"response_text"` (the exact normalized text that was scored) so a
+truncated or unexpectedly low-scoring result can be debugged without
+re-running the model.
 
 ## Test catalog
 

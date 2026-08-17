@@ -14,6 +14,18 @@ import (
 //nolint:gosec // this is an env var *name*, not a credential value
 const apiKeyEnvVar = "LLMTB_API_KEY" // #nosec G101 -- this is an env var *name*, not a credential value
 
+// Defaults applied when the corresponding YAML key is omitted (or explicit
+// zero). max_tokens_default was raised from 4000 to 12000 after a live run
+// showed reasoning models spend thousands of completion tokens on
+// reasoning_content before writing an answer to content: a small
+// per-test/default budget truncates the answer (finish_reason=length)
+// before it is ever written, scoring a correct model as 0.
+const (
+	defaultConcurrency    = 8
+	defaultRequestTimeout = 300 * time.Second
+	defaultMaxTokens      = 12000
+)
+
 // Config is the top-level configuration loaded from config.yaml.
 type Config struct {
 	Endpoint         string        `yaml:"endpoint"`
@@ -73,6 +85,8 @@ func parse(data []byte) (Config, error) {
 		cfg.RequestTimeout = d
 	}
 
+	applyDefaults(&cfg)
+
 	if envKey := os.Getenv(apiKeyEnvVar); envKey != "" {
 		cfg.APIKey = envKey
 	}
@@ -81,6 +95,21 @@ func parse(data []byte) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// applyDefaults fills in Concurrency, RequestTimeout, and MaxTokensDefault
+// when the YAML omitted them (or gave an explicit zero), so a minimal
+// config.yaml still runs with sane, generous-enough values.
+func applyDefaults(cfg *Config) {
+	if cfg.Concurrency <= 0 {
+		cfg.Concurrency = defaultConcurrency
+	}
+	if cfg.RequestTimeout <= 0 {
+		cfg.RequestTimeout = defaultRequestTimeout
+	}
+	if cfg.MaxTokensDefault <= 0 {
+		cfg.MaxTokensDefault = defaultMaxTokens
+	}
 }
 
 // Validate checks that required fields are present and sane.

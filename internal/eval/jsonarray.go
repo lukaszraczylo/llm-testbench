@@ -7,8 +7,10 @@ import (
 	"strings"
 )
 
-// decodeStringArray extracts the first JSON value from response and decodes
-// it as a []string. Elements that are not strings cause an error.
+// decodeStringArray extracts response's JSON value via ExtractJSON (the
+// first ```json fenced block if present, otherwise the last balanced JSON
+// value in the text) and decodes it as a []string. Elements that are not
+// strings cause an error.
 func decodeStringArray(response string) ([]string, error) {
 	raw, err := ExtractJSON(response)
 	if err != nil {
@@ -27,9 +29,10 @@ type jsonStringSetEval struct {
 	want []string
 }
 
-// JSONStringSet returns an Evaluator that parses the first JSON array in the
-// response as a set of strings (case-insensitive, trimmed) and compares it
-// to want, order-independent. Score is the Jaccard-style overlap
+// JSONStringSet returns an Evaluator that parses response's JSON array (see
+// decodeStringArray/ExtractJSON) as a set of strings (case-insensitive,
+// trimmed) and compares it to want, order-independent. Score is the
+// Jaccard-style overlap
 // |intersection| / max(len(want), len(got)), so both missing and extraneous
 // entries cost credit; full credit requires an exact set match.
 func JSONStringSet(want []string) Evaluator {
@@ -81,10 +84,11 @@ type jsonStringArrayEqualsEval struct {
 	want []string
 }
 
-// JSONStringArrayEquals returns an Evaluator that parses the first JSON
-// array in the response as []string and awards full credit only when it
-// exactly equals want element-for-element, in order (case-insensitive,
-// trimmed). Any mismatch, including reordering, scores zero.
+// JSONStringArrayEquals returns an Evaluator that parses response's JSON
+// array (see decodeStringArray/ExtractJSON) as []string and awards full
+// credit only when it exactly equals want element-for-element, in order
+// (case-insensitive, trimmed). Any mismatch, including reordering, scores
+// zero.
 func JSONStringArrayEquals(want []string) Evaluator {
 	return jsonStringArrayEqualsEval{want: want}
 }

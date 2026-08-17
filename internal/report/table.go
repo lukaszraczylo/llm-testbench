@@ -51,13 +51,18 @@ func writeScoreTable(ew *errWriter, tests []testkit.Test, models []string, idx r
 	header = append(header, models...)
 	ew.println(strings.Join(header, "\t"))
 
+	anyTruncated := false
 	for _, t := range sortedTests(tests) {
 		row := []string{t.ID, t.Category, t.Subcategory}
 		for _, model := range models {
 			r, ok := idx[t.ID][model]
 			row = append(row, cellText(r, ok))
+			anyTruncated = anyTruncated || r.Truncated()
 		}
 		ew.println(strings.Join(row, "\t"))
+	}
+	if anyTruncated {
+		ew.println(truncatedLegend)
 	}
 }
 

@@ -56,37 +56,59 @@ func mentionsLimitIncrease() eval.Evaluator {
 }
 
 // kubectlLiveMutationPattern matches any mention of "kubectl edit" or
-// "kubectl patch", negated or not.
+// "kubectl patch", negated or not - whether mid-sentence, at a bare line
+// start, or as a bulleted list item.
 var kubectlLiveMutationPattern = regexp.MustCompile(`(?i)kubectl\s+(edit|patch)\b`)
-
-// kubectlImperativeMutationPattern matches a bare/imperative "kubectl
-// edit"/"kubectl patch" at the start of a line (optionally after
-// whitespace or a bullet marker) - a command a reader would actually run,
-// never acceptable regardless of negation cues elsewhere in the response.
-var kubectlImperativeMutationPattern = regexp.MustCompile(`(?im)^\s*(?:[-*]\s*)?kubectl\s+(edit|patch)\b`)
 
 // negationCuePattern matches a word that turns a mention of the forbidden
 // command into a warning against running it, rather than an instruction to
 // run it (e.g. "do not run kubectl patch...").
-var negationCuePattern = regexp.MustCompile(`(?i)\b(don'?t|do not|never|avoid|instead of|not)\b`)
+var negationCuePattern = regexp.MustCompile(`(?i)\b(don'?t|do not|never|avoid|instead of|not|cannot|can'?t|rather than|without|no need)\b`)
 
 // negationWindow is how many characters before a "kubectl edit|patch"
-// mention (never crossing a newline) are searched for a negation cue.
+// mention are searched for a negation cue.
 const negationWindow = 60
+
+// negationWindowStart returns the earliest byte offset in response to
+// search for a negation cue before a "kubectl edit|patch" match starting
+// at start. The window is the current line, extended back to the start of
+// the immediately preceding line when that line is non-empty: a
+// hard-wrapped sentence whose negation cue landed on the line above (e.g.
+// "...do not run\nkubectl edit...") would otherwise score 0 even though it
+// is the correct, negated answer. Either way, the window never reaches
+// more than negationWindow characters before start.
+func negationWindowStart(response string, start int) int {
+	curLineStart := strings.LastIndexByte(response[:start], '\n') + 1
+
+	windowFloor := curLineStart
+	if curLineStart > 0 {
+		prevLineEnd := curLineStart - 1 // the newline separating the two lines
+		prevLineStart := strings.LastIndexByte(response[:prevLineEnd], '\n') + 1
+		if strings.TrimSpace(response[prevLineStart:prevLineEnd]) != "" {
+			windowFloor = prevLineStart
+		}
+	}
+
+	return max(start-negationWindow, windowFloor)
+}
 
 // noLiveKubectlMutation scores full credit unless the response instructs
 // running "kubectl edit"/"kubectl patch" against the live cluster. A
 // contrastive mention - warning the reader not to do this, in favor of the
-// GitOps procedure - is fine and does not cost credit; an imperative or
-// otherwise unnegated mention scores zero. This is deliberately not
-// eval.NotContains, which would also zero out the best possible answer
-// (one that correctly explains why NOT to run kubectl edit/patch).
+// GitOps procedure - is fine and does not cost credit; an unnegated
+// mention scores zero. This is deliberately not eval.NotContains, which
+// would also zero out the best possible answer (one that correctly
+// explains why NOT to run kubectl edit/patch).
+//
+// Every occurrence goes through the same negation-window check, including
+// one at the start of a line (a bulleted "don't do this" list item, or a
+// hard-wrapped sentence whose negation cue landed on the line above): a
+// response is not penalized just because word-wrap or list formatting put
+// the command text at a line start. A genuinely bare imperative still
+// fails, because negationWindowStart never finds a negation cue in its
+// (possibly line-extended) window.
 func noLiveKubectlMutation() eval.Evaluator {
 	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
-		if kubectlImperativeMutationPattern.MatchString(response) {
-			return eval.Score{Value: 0, Detail: "imperative kubectl edit/patch command present"}
-		}
-
 		matches := kubectlLiveMutationPattern.FindAllStringIndex(response, -1)
 		if len(matches) == 0 {
 			return eval.Score{Value: 1, Detail: "no mention of kubectl edit/patch"}
@@ -94,11 +116,7 @@ func noLiveKubectlMutation() eval.Evaluator {
 
 		for _, loc := range matches {
 			start := loc[0]
-			lineStart := strings.LastIndexByte(response[:start], '\n') + 1
-			windowStart := start - negationWindow
-			if windowStart < lineStart {
-				windowStart = lineStart
-			}
+			windowStart := negationWindowStart(response, start)
 			if !negationCuePattern.MatchString(response[windowStart:start]) {
 				return eval.Score{Value: 0, Detail: "unnegated mention of kubectl edit/patch"}
 			}

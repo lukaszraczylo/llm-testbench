@@ -119,7 +119,7 @@ func TestGoWorkerPoolTest_Eval(t *testing.T) {
 		want     float64
 	}{
 		{"correct concurrent pool", correctPool, 1},
-		{"sequential pool fails concurrency/timing check", sequentialPool, 0},
+		{"sequential pool fails the maxConcurrent>=2 check", sequentialPool, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

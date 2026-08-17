@@ -50,12 +50,36 @@ type chatMsg struct {
 	Content string `json:"content"`
 }
 
+// responseMsg is the assistant message inside one response choice. Content
+// is a pointer, not a plain string: some OpenAI-compatible backends return
+// "content": null when generation was cut off before any answer token was
+// emitted (for example finish_reason=length on a reasoning model that
+// spent its whole token budget on reasoning_content and never reached
+// content). Text reports that case as "", explicitly, rather than relying
+// on encoding/json's implicit null-into-string zero-value behavior.
+//
+// Deliberately not evaluated: reasoning_content. The catalog's evaluators
+// score the answer a user would actually see, which is content only.
+type responseMsg struct {
+	Content *string `json:"content"`
+	Role    string  `json:"role"`
+}
+
+// Text returns m.Content, or "" if the backend sent "content": null.
+func (m responseMsg) Text() string {
+	if m.Content == nil {
+		return ""
+	}
+	return *m.Content
+}
+
 type chatCompletionResponse struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	Choices []struct {
-		Message chatMsg `json:"message"`
+		Message      responseMsg `json:"message"`
+		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -105,9 +129,10 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 		}
 
 		latency := time.Since(attemptStart)
-		text := ""
+		var text, finishReason string
 		if len(resp.Choices) > 0 {
-			text = resp.Choices[0].Message.Content
+			text = resp.Choices[0].Message.Text()
+			finishReason = resp.Choices[0].FinishReason
 		}
 		if resp.Error != nil {
 			lastErr = fmt.Errorf("llm: api error: %s", resp.Error.Message)
@@ -115,6 +140,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 		}
 		return Response{
 			Text:             text,
+			FinishReason:     finishReason,
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			Latency:          latency,

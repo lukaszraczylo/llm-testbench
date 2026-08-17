@@ -56,8 +56,11 @@ func computeLP64StructSize(fieldTypes []string) (uintptr, error) {
 // structAlignFieldPattern matches one "Name Type" struct field declaration
 // line for the specific 5 fields goStructAlignTest's prompt gives (Active
 // bool, ID int64, Priority int32, Name string, Flag byte), in whatever
-// order the response declares them.
-var structAlignFieldPattern = regexp.MustCompile(`(?m)^\s*(Active|ID|Priority|Name|Flag)\s+(bool|int64|int32|string|byte)\s*$`)
+// order the response declares them. An optional Go struct tag
+// ("`json:\"name\"`") and/or an optional trailing "// comment" (e.g. "Name
+// string // 16 bytes", a model explaining its layout reasoning inline) are
+// both tolerated between the type and the end of the line (5c).
+var structAlignFieldPattern = regexp.MustCompile("(?m)^\\s*(Active|ID|Priority|Name|Flag)\\s+(bool|int64|int32|string|byte)(?:\\s+`[^`]*`)?\\s*(?://.*)?$")
 
 // structAlignWantFields is the required field name -> type mapping;
 // goStructAlignEval rejects a response that renames, retypes, drops, or

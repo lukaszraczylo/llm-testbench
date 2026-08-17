@@ -4,6 +4,7 @@ package runner
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -13,15 +14,32 @@ import (
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
 
+// truncatedDetailPrefix is prepended to Score.Detail when the model's
+// response was cut off by the token budget (llm.FinishReasonLength), so
+// the reason a test scored the way it did is visible without cross-
+// referencing FinishReason separately.
+const truncatedDetailPrefix = "TRUNCATED: "
+
 // Result is the outcome of running one test against one model.
 type Result struct {
 	Err              error
 	Model            string
 	TestID           string
+	ResponseText     string
+	FinishReason     string
 	Score            eval.Score
 	Latency          time.Duration
 	PromptTokens     int
 	CompletionTokens int
+}
+
+// Truncated reports whether the model's response was cut off by the token
+// budget before it finished (finish_reason=length), rather than completing
+// normally. A truncated response's Score is still whatever the evaluator
+// computed on the partial text; Truncated is the signal that the score may
+// not reflect what the model would have said with a larger budget.
+func (r Result) Truncated() bool {
+	return r.FinishReason == llm.FinishReasonLength
 }
 
 // TotalTokens returns PromptTokens + CompletionTokens, the total token
@@ -32,12 +50,9 @@ func (r Result) TotalTokens() int {
 
 // Config controls how the Runner fans work out.
 type Config struct {
-	// Concurrency bounds the number of in-flight (model,test) calls.
-	Concurrency int
-	// Temperature is sent on every request; PLAN.md pins this to 0 for
-	// determinism across runs.
-	Temperature float64
-	// MaxTokensDefault is used when a Test does not set its own MaxTokens.
+	Reporter         ProgressReporter
+	Concurrency      int
+	Temperature      float64
 	MaxTokensDefault int
 }
 
@@ -49,6 +64,9 @@ type Runner struct {
 
 // New builds a Runner that issues requests through client.
 func New(client llm.Client, cfg Config) *Runner {
+	if cfg.Reporter == nil {
+		cfg.Reporter = NoopProgressReporter{}
+	}
 	return &Runner{client: client, cfg: cfg}
 }
 
@@ -77,11 +95,21 @@ func (r *Runner) Run(ctx context.Context, models []string, tests []testkit.Test)
 	}
 	g.SetLimit(concurrency)
 
+	r.cfg.Reporter.ReportStart(len(tests), len(models), concurrency)
+
+	var completed int32
 	// go.mod's go directive is 1.22+, so loop variables are already
 	// per-iteration scoped; no manual i, j := i, j shadowing needed (N4).
 	for i, j := range jobs {
 		g.Go(func() error {
-			results[i] = r.runOne(gctx, j.model, j.test)
+			res := r.runOne(gctx, j.model, j.test)
+			results[i] = res
+			// atomic.AddInt32 makes the completion counter safe under
+			// Config.Concurrency-many concurrent goroutines; ReportDone
+			// itself must also be concurrency-safe per the ProgressReporter
+			// contract.
+			done := atomic.AddInt32(&completed, 1)
+			r.cfg.Reporter.ReportDone(int(done), len(jobs), res)
 			return nil
 		})
 	}
@@ -95,10 +123,14 @@ func (r *Runner) Run(ctx context.Context, models []string, tests []testkit.Test)
 
 // runOne executes a single (model, test) combination.
 func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) Result {
-	maxTokens := test.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = r.cfg.MaxTokensDefault
-	}
+	// cfg.MaxTokensDefault is a floor, not a fallback used only when the
+	// test leaves MaxTokens unset: a per-test value only ever raises the
+	// budget, it never lowers it below the default. A reasoning model can
+	// burn thousands of tokens on reasoning_content before ever writing an
+	// answer to content, so a small per-test MaxTokens (sized for the
+	// answer alone) previously starved the model into finish_reason=length
+	// with an empty answer.
+	maxTokens := max(test.MaxTokens, r.cfg.MaxTokensDefault)
 
 	messages := make([]llm.Message, 0, 2)
 	if test.System != "" {
@@ -120,11 +152,16 @@ func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) Re
 
 	normalized := testkit.Normalize(resp.Text)
 	score := test.Eval.Evaluate(ctx, normalized)
+	if resp.FinishReason == llm.FinishReasonLength {
+		score.Detail = truncatedDetailPrefix + score.Detail
+	}
 
 	return Result{
 		Model:            model,
 		TestID:           test.ID,
 		Score:            score,
+		ResponseText:     normalized,
+		FinishReason:     resp.FinishReason,
 		Latency:          resp.Latency,
 		PromptTokens:     resp.PromptTokens,
 		CompletionTokens: resp.CompletionTokens,

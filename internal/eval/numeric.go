@@ -17,43 +17,115 @@ type Number interface {
 		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64
 }
 
-// numberPattern matches signed integers and decimals, including a
+// digitPattern matches unsigned integers and decimals, including a
 // leading-dot form with no integer part (".9896"). Longer alternatives are
 // listed first so the match is not truncated to just the integer part of
-// "0.9896" or just the dot-less ".9896".
-var numberPattern = regexp.MustCompile(`-?(?:\d+\.\d+|\.\d+|\d+)`)
+// "0.9896" or just the dot-less ".9896". It deliberately excludes the sign:
+// classifyMatch decides, per match, whether a leading '-' in the source
+// text is a real minus sign or a compound-word hyphen ("x86-64").
+var digitPattern = regexp.MustCompile(`\d+\.\d+|\.\d+|\d+`)
 
-// hyphenCompoundSuffixPattern matches a hyphen directly after a number
-// joining it to a following word, e.g. the "-bit" in "64-bit" or the
-// "-byte" in "8-byte". A number immediately followed by this is part of a
-// unit/architecture descriptor, not a standalone answer value, and is
-// skipped when picking "the" number out of a line - otherwise "sizeof(...)
-// is 24 bytes on a 64-bit system" would extract the trailing 64 instead of
-// the actual answer, 24.
-var hyphenCompoundSuffixPattern = regexp.MustCompile(`^-\w`)
+// isWordByte reports whether b is a letter, digit, or underscore - the
+// standard regex \w character class - used to detect a digit run glued
+// directly to an identifier ("LP64", the "86"/"64" in "x86_64").
+func isWordByte(b byte) bool {
+	return b == '_' ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9')
+}
 
-// lastRelevantNumber returns the last number in text that is not part of a
-// "<number>-word" compound, scanning from the end.
-func lastRelevantNumber(text string) (string, bool) {
-	matches := numberPattern.FindAllStringIndex(text, -1)
+// numberCandidate is one digitPattern match, classified by classifyMatch.
+type numberCandidate struct {
+	// literal is the text to parse: the matched digits, with a leading '-'
+	// prepended when classifyMatch determined it is a real sign.
+	literal string
+	// compoundHyphen marks a number joined by a hyphen to an adjacent word
+	// ("64-bit", "8-byte", or the "64" in "x86-64"): a unit/architecture
+	// descriptor, not a standalone answer value. Rejected in the first two
+	// extraction tiers, accepted only as ExtractLastNumber's last resort.
+	compoundHyphen bool
+}
+
+// classifyMatch inspects the characters immediately surrounding the
+// unsigned digit run text[start:end] and classifies it:
+//
+//   - a digit run glued directly (no separating punctuation) to a
+//     letter/digit/underscore on either side is part of an identifier
+//     ("LP64", "x86_64") and is never a real candidate, at any tier;
+//   - a '-' immediately before the run is a real minus sign only when the
+//     character before THAT is not alphanumeric, so "x86-64" does not read
+//     as "x86" followed by the negative number -64;
+//   - a number joined by a hyphen to an adjacent word on either side
+//     ("64-bit", "8-byte", the "64" in "x86-64" once its bogus sign is
+//     stripped) is flagged compoundHyphen rather than rejected outright.
+func classifyMatch(text string, start, end int) (numberCandidate, bool) {
+	literal := text[start:end]
+
+	if start > 0 && text[start-1] == '-' {
+		signIsReal := start-2 < 0 || !isWordByte(text[start-2])
+		if signIsReal {
+			literal = "-" + literal
+			start--
+		}
+	}
+
+	if start > 0 && isWordByte(text[start-1]) {
+		return numberCandidate{}, false // e.g. the "64" in "LP64"
+	}
+	if end < len(text) && isWordByte(text[end]) {
+		return numberCandidate{}, false // e.g. "24bytes" with no separator
+	}
+
+	compound := start > 0 && text[start-1] == '-' && start-2 >= 0 && isWordByte(text[start-2])
+
+	if end < len(text) && text[end] == '-' && end+1 < len(text) && isWordByte(text[end+1]) {
+		compound = true // e.g. "64-bit", "24-byte"
+	}
+
+	return numberCandidate{literal: literal, compoundHyphen: compound}, true
+}
+
+// findLastNumber returns the last acceptable numberCandidate's literal in
+// text, scanning from the end. allowCompound controls whether a
+// compoundHyphen candidate ("24-byte") counts as acceptable.
+func findLastNumber(text string, allowCompound bool) (string, bool) {
+	matches := digitPattern.FindAllStringIndex(text, -1)
 	for i := len(matches) - 1; i >= 0; i-- {
-		start, end := matches[i][0], matches[i][1]
-		if hyphenCompoundSuffixPattern.MatchString(text[end:]) {
+		cand, ok := classifyMatch(text, matches[i][0], matches[i][1])
+		if !ok {
 			continue
 		}
-		return text[start:end], true
+		if cand.compoundHyphen && !allowCompound {
+			continue
+		}
+		return cand.literal, true
 	}
 	return "", false
 }
 
 // ExtractLastNumber returns the model's answer number from s, converted to
-// T. It first looks only at the last non-empty line (the common case: a
-// final "24" or "0.9896" on its own line after any reasoning), and only
-// falls back to the last number anywhere in s if that line has no usable
-// number at all. Within whichever text it searches, it skips a number that
-// is part of a "<number>-word" compound (see hyphenCompoundSuffixPattern):
-// "sizeof(struct Config) is 24 bytes on a 64-bit system" must extract 24,
-// not the later, unrelated 64. It is the default extractor for Numeric.
+// T, in three tiers:
+//
+//  1. The last non-empty line, accepting only a standalone number - not
+//     one glued to an identifier ("LP64", "x86_64") or joined by a hyphen
+//     to a unit/architecture word ("64-bit", "x86-64").
+//  2. If that line has no standalone number, the same standalone-only
+//     search over the whole response (the earlier "24 bytes on a 64-bit
+//     system" -> 24 case, when the qualifier ends up on the last line).
+//  3. If still nothing, a hyphen-compound number is accepted as a last
+//     resort rather than erroring ("It is a 24-byte struct." -> 24).
+//
+// A number glued directly to an identifier is never accepted, at any
+// tier: "LP64"/"x86_64" never contribute 64 as an answer.
+//
+// This is inherently a heuristic, not a parser: a response like "Total: 24
+// bytes (22 bytes of members plus 2 tail padding)" has three standalone,
+// non-compound numbers, and ExtractLastNumber returns the last one (2),
+// not the intended total (24). Prompts whose expected answer format risks
+// this kind of trailing parenthetical breakdown should ask for the number
+// alone, with no explanation, rather than rely on this heuristic to find
+// it in prose.
 func ExtractLastNumber[T Number](s string) (T, error) {
 	lines := strings.Split(s, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -61,20 +133,25 @@ func ExtractLastNumber[T Number](s string) (T, error) {
 		if line == "" {
 			continue
 		}
-		if lit, ok := lastRelevantNumber(line); ok {
+		if lit, ok := findLastNumber(line, false); ok {
 			return parseNumber[T](lit)
 		}
 		break
 	}
 
-	if lit, ok := lastRelevantNumber(s); ok {
+	if lit, ok := findLastNumber(s, false); ok {
 		return parseNumber[T](lit)
 	}
+
+	if lit, ok := findLastNumber(s, true); ok {
+		return parseNumber[T](lit)
+	}
+
 	return 0, fmt.Errorf("no number found in response")
 }
 
-// parseNumber converts a numberPattern match (possibly ".9896", with no
-// leading zero) to T.
+// parseNumber converts a digitPattern-derived literal (possibly ".9896",
+// with no leading zero, or signed) to T.
 func parseNumber[T Number](literal string) (T, error) {
 	f, err := strconv.ParseFloat(literal, 64)
 	if err != nil {

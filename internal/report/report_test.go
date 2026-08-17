@@ -116,6 +116,85 @@ func TestRenderJSON_DumpsRawResults(t *testing.T) {
 	}
 }
 
+func TestRenderTable_TruncatedCellsGetSuffixAndLegend(t *testing.T) {
+	tests := []testkit.Test{{ID: "t1", Category: "c", Subcategory: "s"}}
+	results := []runner.Result{
+		{Model: "m1", TestID: "t1", Score: eval.Score{Value: 0, Detail: "TRUNCATED: got \"\""}, FinishReason: "length"},
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatTable, tests, []string{"m1"}, results); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "0.00 (0tok)!") {
+		t.Errorf("table output missing truncated \"!\" suffix:\n%s", out)
+	}
+	if !strings.Contains(out, truncatedLegend) {
+		t.Errorf("table output missing the truncation legend:\n%s", out)
+	}
+}
+
+func TestRenderTable_NoLegendWhenNothingTruncated(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatTable, sampleTests(), []string{"m1", "m2"}, sampleResults()); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, truncatedLegend) {
+		t.Errorf("table output should not print the truncation legend when nothing truncated:\n%s", out)
+	}
+}
+
+func TestRenderMarkdown_TruncatedCellsGetSuffixAndLegend(t *testing.T) {
+	tests := []testkit.Test{{ID: "t1", Category: "c", Subcategory: "s"}}
+	results := []runner.Result{
+		{Model: "m1", TestID: "t1", Score: eval.Score{Value: 0}, FinishReason: "length"},
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatMarkdown, tests, []string{"m1"}, results); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "0.00 (0tok)!") {
+		t.Errorf("markdown output missing truncated \"!\" suffix:\n%s", out)
+	}
+	if !strings.Contains(out, truncatedLegend) {
+		t.Errorf("markdown output missing the truncation legend:\n%s", out)
+	}
+}
+
+func TestRenderJSON_IncludesResponseTextFinishReasonAndTruncated(t *testing.T) {
+	tests := []testkit.Test{{ID: "t1", Category: "c"}}
+	results := []runner.Result{
+		{Model: "m1", TestID: "t1", Score: eval.Score{Value: 0, Detail: "TRUNCATED: got \"\""}, ResponseText: "partial answer", FinishReason: "length"},
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatJSON, tests, []string{"m1"}, results); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	var out []jsonResult
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; output:\n%s", err, buf.String())
+	}
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1", len(out))
+	}
+	got := out[0]
+	if got.ResponseText != "partial answer" {
+		t.Errorf("ResponseText = %q, want %q", got.ResponseText, "partial answer")
+	}
+	if got.FinishReason != "length" {
+		t.Errorf("FinishReason = %q, want length", got.FinishReason)
+	}
+	if !got.Truncated {
+		t.Error("Truncated = false, want true")
+	}
+	if !strings.HasPrefix(got.Detail, "TRUNCATED: ") {
+		t.Errorf("Detail = %q, want a TRUNCATED: prefix", got.Detail)
+	}
+}
+
 func TestRender_UnknownFormat(t *testing.T) {
 	var buf bytes.Buffer
 	err := Render(&buf, Format("bogus"), sampleTests(), []string{"m1"}, sampleResults())

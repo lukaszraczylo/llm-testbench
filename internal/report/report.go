@@ -72,19 +72,37 @@ func sortedTests(tests []testkit.Test) []testkit.Test {
 	return out
 }
 
+// truncatedSuffix marks a cell whose underlying response was cut off by
+// the token budget (finish_reason=length): the score may not reflect what
+// the model would have answered with a larger budget. truncatedLegend is
+// the one-line explanation printed once per table/markdown report.
+const (
+	truncatedSuffix = "!"
+	truncatedLegend = "! = response truncated by the token budget (finish_reason=length); increase max_tokens_default to avoid"
+)
+
 // cellText renders one (test, model) cell for the score table: "score
-// (Ntok)" for a scored result, or ERR/skip/N/A otherwise.
+// (Ntok)" for a scored result, or ERR/skip/N/A otherwise, with a
+// truncatedSuffix appended when the response was cut off by the token
+// budget.
 func cellText(r runner.Result, found bool) string {
-	switch {
-	case !found:
+	if !found {
 		return "N/A"
-	case r.Err != nil:
-		return "ERR"
-	case r.Score.Skipped:
-		return "skip"
-	default:
-		return fmt.Sprintf("%.2f (%dtok)", r.Score.Value, r.TotalTokens())
 	}
+
+	var text string
+	switch {
+	case r.Err != nil:
+		text = "ERR"
+	case r.Score.Skipped:
+		text = "skip"
+	default:
+		text = fmt.Sprintf("%.2f (%dtok)", r.Score.Value, r.TotalTokens())
+	}
+	if r.Truncated() {
+		text += truncatedSuffix
+	}
+	return text
 }
 
 // categoryMean holds the per-model mean score for one category, computed

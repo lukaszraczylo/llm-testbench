@@ -21,6 +21,23 @@ func newTestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	return srv
 }
 
+// testChoice builds one response choice with a non-null content string, the
+// common case. Its return type is exactly chatCompletionResponse.Choices's
+// element type, so callers can append() it without repeating the anonymous
+// struct type at each call site.
+func testChoice(content, finishReason string) struct {
+	Message      responseMsg `json:"message"`
+	FinishReason string      `json:"finish_reason"`
+} {
+	return struct {
+		Message      responseMsg `json:"message"`
+		FinishReason string      `json:"finish_reason"`
+	}{
+		Message:      responseMsg{Role: "assistant", Content: &content},
+		FinishReason: finishReason,
+	}
+}
+
 func TestOpenAIClient_Complete_Success(t *testing.T) {
 	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
@@ -34,9 +51,7 @@ func TestOpenAIClient_Complete_Success(t *testing.T) {
 			t.Errorf("model = %q, want test-model", body.Model)
 		}
 		resp := chatCompletionResponse{}
-		resp.Choices = []struct {
-			Message chatMsg `json:"message"`
-		}{{Message: chatMsg{Role: "assistant", Content: "hello there"}}}
+		resp.Choices = append(resp.Choices, testChoice("hello there", "stop"))
 		resp.Usage.PromptTokens = 12
 		resp.Usage.CompletionTokens = 3
 		_ = json.NewEncoder(w).Encode(resp)
@@ -53,8 +68,58 @@ func TestOpenAIClient_Complete_Success(t *testing.T) {
 	if resp.Text != "hello there" {
 		t.Errorf("Text = %q, want %q", resp.Text, "hello there")
 	}
+	if resp.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want stop", resp.FinishReason)
+	}
 	if resp.PromptTokens != 12 || resp.CompletionTokens != 3 {
 		t.Errorf("tokens = %d/%d, want 12/3", resp.PromptTokens, resp.CompletionTokens)
+	}
+}
+
+// TestOpenAIClient_Complete_ParsesFinishReasonLength verifies
+// choices[0].finish_reason lands in Response.FinishReason == "length", the
+// signal that generation was cut off by the token budget (root cause of the
+// live-run incident: a truncated reasoning-model response silently scored
+// 0 with no visible signal that it was ever cut off).
+func TestOpenAIClient_Complete_ParsesFinishReasonLength(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{}
+		resp.Choices = append(resp.Choices, testChoice("partial ans", FinishReasonLength))
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	client := NewOpenAIClient(srv.URL, "", time.Second)
+	resp, err := client.Complete(context.Background(), Request{Model: "m", Messages: []Message{{Role: "user", Content: "x"}}})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if resp.FinishReason != FinishReasonLength {
+		t.Errorf("FinishReason = %q, want %q", resp.FinishReason, FinishReasonLength)
+	}
+}
+
+// TestOpenAIClient_Complete_NullContentIsEmptyString verifies a backend
+// sending "content": null (a reasoning model that spent its whole token
+// budget on reasoning_content and never wrote to content) decodes to
+// Response.Text == "", not a decode error or a panic.
+func TestOpenAIClient_Complete_NullContentIsEmptyString(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"length"}],"usage":{"prompt_tokens":50,"completion_tokens":6000}}`))
+	})
+
+	client := NewOpenAIClient(srv.URL, "", time.Second)
+	resp, err := client.Complete(context.Background(), Request{Model: "m", Messages: []Message{{Role: "user", Content: "x"}}})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if resp.Text != "" {
+		t.Errorf("Text = %q, want empty string for null content", resp.Text)
+	}
+	if resp.FinishReason != FinishReasonLength {
+		t.Errorf("FinishReason = %q, want %q", resp.FinishReason, FinishReasonLength)
+	}
+	if resp.CompletionTokens != 6000 {
+		t.Errorf("CompletionTokens = %d, want 6000 (tokens were spent on reasoning_content, not content)", resp.CompletionTokens)
 	}
 }
 
@@ -107,9 +172,7 @@ func TestOpenAIClient_Complete_RetriesOn5xxThenSucceeds(t *testing.T) {
 			return
 		}
 		resp := chatCompletionResponse{}
-		resp.Choices = []struct {
-			Message chatMsg `json:"message"`
-		}{{Message: chatMsg{Role: "assistant", Content: "ok"}}}
+		resp.Choices = append(resp.Choices, testChoice("ok", "stop"))
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 

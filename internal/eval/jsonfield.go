@@ -122,19 +122,22 @@ func asFloat64(v any) (float64, error) {
 	}
 }
 
-// jsonFieldEval extracts one field by path from the first JSON value in the
-// response and compares it to want.
+// jsonFieldEval extracts one field by path from the response's JSON value
+// (see ExtractJSON: the first ```json fenced block if present, otherwise
+// the last balanced JSON value in the response) and compares it to want.
 type jsonFieldEval[T comparable] struct {
 	want T
 	path string
 }
 
-// JSONField returns an Evaluator that extracts the first JSON object/array
-// in the response (stripping surrounding prose and code fences), navigates
-// path (dot/bracket syntax, e.g. "bump" or "steps[0]"), and awards full
-// credit when the field equals want. T is inferred from want; supported
-// types are string, bool, float64, and int. String comparison is
-// case-insensitive and trims whitespace.
+// JSONField returns an Evaluator that extracts the response's JSON
+// object/array via ExtractJSON (stripping surrounding prose and code
+// fences; the first fenced ```json block wins if present, otherwise the
+// last balanced JSON value in the text - see ExtractJSON), navigates path
+// (dot/bracket syntax, e.g. "bump" or "steps[0]"), and awards full credit
+// when the field equals want. T is inferred from want; supported types are
+// string, bool, float64, and int. String comparison is case-insensitive
+// and trims whitespace.
 func JSONField[T comparable](path string, want T) Evaluator {
 	return jsonFieldEval[T]{path: path, want: want}
 }

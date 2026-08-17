@@ -3,6 +3,8 @@ package runner
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,6 +182,74 @@ func TestRunner_Run_FallsBackToDefaultMaxTokens(t *testing.T) {
 	}
 }
 
+// TestRunner_Run_DefaultIsAFloorNotJustAFallback is the regression test for
+// the systemic live-run bug: cfg.MaxTokensDefault must raise a too-small
+// per-test MaxTokens, not just fill in for a zero one.
+func TestRunner_Run_DefaultIsAFloorNotJustAFallback(t *testing.T) {
+	var gotMaxTokens int
+	client := &mockClient{
+		respond: func(req llm.Request) (llm.Response, error) {
+			gotMaxTokens = req.MaxTokens
+			return llm.Response{Text: "OK"}, nil
+		},
+	}
+	r := New(client, Config{Concurrency: 1, MaxTokensDefault: 6000})
+
+	r.Run(context.Background(), []string{"model-a"}, []testkit.Test{
+		{ID: "t1", Category: "c", Prompt: "p", MaxTokens: 200, Eval: echoEval()},
+	})
+
+	if gotMaxTokens != 6000 {
+		t.Errorf("MaxTokens = %d, want 6000 (config default is a floor; a smaller per-test 200 must not lower it)", gotMaxTokens)
+	}
+}
+
+func TestRunner_Run_TracksFinishReasonAndResponseText(t *testing.T) {
+	client := &mockClient{
+		respond: func(_ llm.Request) (llm.Response, error) {
+			return llm.Response{Text: "  OK  ", FinishReason: "stop"}, nil
+		},
+	}
+	r := New(client, Config{Concurrency: 1, MaxTokensDefault: 100})
+
+	results := r.Run(context.Background(), []string{"model-a"}, []testkit.Test{
+		{ID: "t1", Category: "c", Prompt: "p", Eval: echoEval()},
+	})
+
+	if results[0].FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want stop", results[0].FinishReason)
+	}
+	if results[0].ResponseText != "OK" {
+		t.Errorf("ResponseText = %q, want the normalized \"OK\"", results[0].ResponseText)
+	}
+	if results[0].Truncated() {
+		t.Error("Truncated() = true, want false for finish_reason=stop")
+	}
+}
+
+// TestRunner_Run_TruncatedPrefixesScoreDetail is the regression test for
+// fix 4: a finish_reason=length response must be visibly flagged in
+// Score.Detail, not just silently scored.
+func TestRunner_Run_TruncatedPrefixesScoreDetail(t *testing.T) {
+	client := &mockClient{
+		respond: func(_ llm.Request) (llm.Response, error) {
+			return llm.Response{Text: "partial", FinishReason: llm.FinishReasonLength}, nil
+		},
+	}
+	r := New(client, Config{Concurrency: 1, MaxTokensDefault: 100})
+
+	results := r.Run(context.Background(), []string{"model-a"}, []testkit.Test{
+		{ID: "t1", Category: "c", Prompt: "p", Eval: echoEval()},
+	})
+
+	if !results[0].Truncated() {
+		t.Fatal("Truncated() = false, want true for finish_reason=length")
+	}
+	if !strings.HasPrefix(results[0].Score.Detail, "TRUNCATED: ") {
+		t.Errorf("Score.Detail = %q, want a TRUNCATED: prefix", results[0].Score.Detail)
+	}
+}
+
 func TestRunner_Run_IncludesSystemMessageWhenSet(t *testing.T) {
 	var gotMessages []llm.Message
 	client := &mockClient{
@@ -197,6 +267,89 @@ func TestRunner_Run_IncludesSystemMessageWhenSet(t *testing.T) {
 	if len(gotMessages) != 2 || gotMessages[0].Role != "system" || gotMessages[1].Role != "user" {
 		t.Errorf("Messages = %+v, want [system, user]", gotMessages)
 	}
+}
+
+// recordingReporter is a ProgressReporter that records every event under a
+// mutex, so tests can assert on it after a concurrent Run.
+type recordingReporter struct {
+	doneEvents       []doneEvent
+	startCalls       int
+	startTotalTests  int
+	startTotalModels int
+	startConcurrency int
+	mu               sync.Mutex
+}
+
+type doneEvent struct {
+	testID string
+	done   int
+	total  int
+}
+
+func (r *recordingReporter) ReportStart(totalTests, totalModels, concurrency int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.startCalls++
+	r.startTotalTests = totalTests
+	r.startTotalModels = totalModels
+	r.startConcurrency = concurrency
+}
+
+func (r *recordingReporter) ReportDone(done, total int, result Result) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.doneEvents = append(r.doneEvents, doneEvent{done: done, total: total, testID: result.TestID})
+}
+
+func TestRunner_Run_ReportsProgress(t *testing.T) {
+	client := &mockClient{}
+	reporter := &recordingReporter{}
+	r := New(client, Config{Concurrency: 3, MaxTokensDefault: 100, Reporter: reporter})
+
+	tests := []testkit.Test{
+		{ID: "t1", Category: "c", Prompt: "p", Eval: echoEval()},
+		{ID: "t2", Category: "c", Prompt: "p", Eval: echoEval()},
+	}
+	models := []string{"model-a", "model-b", "model-c"}
+
+	r.Run(context.Background(), models, tests)
+
+	if reporter.startCalls != 1 {
+		t.Errorf("ReportStart called %d times, want 1", reporter.startCalls)
+	}
+	if reporter.startTotalTests != len(tests) || reporter.startTotalModels != len(models) || reporter.startConcurrency != 3 {
+		t.Errorf("ReportStart(totalTests=%d, totalModels=%d, concurrency=%d), want (%d, %d, 3)",
+			reporter.startTotalTests, reporter.startTotalModels, reporter.startConcurrency, len(tests), len(models))
+	}
+
+	total := len(tests) * len(models)
+	if len(reporter.doneEvents) != total {
+		t.Fatalf("ReportDone called %d times, want %d", len(reporter.doneEvents), total)
+	}
+
+	seenDone := make(map[int]bool, total)
+	for _, ev := range reporter.doneEvents {
+		if ev.total != total {
+			t.Errorf("ReportDone total = %d, want %d", ev.total, total)
+		}
+		if ev.done < 1 || ev.done > total {
+			t.Errorf("ReportDone done = %d, want in [1, %d]", ev.done, total)
+		}
+		if seenDone[ev.done] {
+			t.Errorf("ReportDone done=%d reported more than once: the completion counter is not concurrency-safe", ev.done)
+		}
+		seenDone[ev.done] = true
+	}
+}
+
+func TestRunner_Run_NilReporterDefaultsToNoop(t *testing.T) {
+	client := &mockClient{}
+	r := New(client, Config{Concurrency: 2, MaxTokensDefault: 100})
+
+	// Must not panic when Config.Reporter is left nil.
+	r.Run(context.Background(), []string{"model-a"}, []testkit.Test{
+		{ID: "t1", Category: "c", Prompt: "p", Eval: echoEval()},
+	})
 }
 
 func TestRunner_Run_TracksLatencyAndTokens(t *testing.T) {

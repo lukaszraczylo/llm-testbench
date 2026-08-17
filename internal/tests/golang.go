@@ -86,8 +86,11 @@ Respond with the corrected struct definition only.`
 // response's Pool[T, R any] implementation (defined in solution.go, same
 // package) with a deliberately slow worker function and checks (a) output
 // order matches input order and (b) the pool actually parallelizes work,
-// via both an observed-concurrency counter and a wall-clock bound far
-// below the fully-sequential time.
+// via an observed-concurrency counter (maxConcurrent >= 2). There is
+// deliberately no wall-clock bound (5e): a CI runner under load can make
+// even genuinely concurrent work take longer than any fixed millisecond
+// budget, and maxConcurrent >= 2 already proves real parallelism without
+// that flake risk.
 const goWorkerPoolHarness = `package main
 
 import (
@@ -122,9 +125,7 @@ func main() {
 		return x * 2
 	}
 
-	start := time.Now()
 	out := Pool(in, workers, f)
-	elapsed := time.Since(start)
 
 	if len(out) != n {
 		fmt.Fprintf(os.Stderr, "len(out)=%d, want %d\n", len(out), n)
@@ -138,12 +139,6 @@ func main() {
 	}
 	if atomic.LoadInt32(&maxConcurrent) < 2 {
 		fmt.Fprintf(os.Stderr, "maxConcurrent=%d, want >= 2: no real concurrency observed\n", maxConcurrent)
-		os.Exit(1)
-	}
-	// Sequential execution would take n*perItem = 200ms; with workers
-	// goroutines truly running in parallel it should land well under that.
-	if elapsed > 120*time.Millisecond {
-		fmt.Fprintf(os.Stderr, "elapsed=%s, want < 120ms: looks sequential\n", elapsed)
 		os.Exit(1)
 	}
 

@@ -59,6 +59,50 @@ func TestNoLiveKubectlMutation(t *testing.T) {
 			response: "Never mind the manifest for now, but you could just casually run a quick kubectl patch to fix the limit right away.",
 			want:     0,
 		},
+		{
+			// Opus round 2, 5a: extending the negation window to the
+			// previous line (and routing every occurrence, including a
+			// line-start one, through that same window) fixes this - it
+			// used to score 0 because "kubectl edit" landed at a hard-wrap
+			// line start and the old code hard-vetoed any line-start
+			// occurrence regardless of the negation on the line above.
+			name:     "hard-wrapped negation: cue on the previous line",
+			response: "Since this is GitOps-managed, you must not\nkubectl edit the deployment directly - instead commit the fix to git.",
+			want:     1,
+		},
+		{
+			// Single bullet, not a multi-item list: the window extends back
+			// exactly one line, so the negation cue must be on the line
+			// immediately above the occurrence, not several lines back.
+			name:     "hard-wrapped negation: single bulleted don't-do-this item",
+			response: "Do not run this:\n- kubectl edit deployment inventory-worker\nInstead, edit the manifest in git and commit.",
+			want:     1,
+		},
+		{
+			name:     "new negation cue: cannot",
+			response: "You cannot safely run kubectl patch against a GitOps-managed cluster.",
+			want:     1,
+		},
+		{
+			name:     "new negation cue: rather than",
+			response: "Commit the fix to git rather than running kubectl edit on the live object.",
+			want:     1,
+		},
+		{
+			name:     "new negation cue: without",
+			response: "Fix this without running kubectl patch against the live cluster.",
+			want:     1,
+		},
+		{
+			name:     "new negation cue: no need",
+			response: "There is no need to run kubectl edit here; commit the change to git instead.",
+			want:     1,
+		},
+		{
+			name:     "blank line still breaks the extension: unrelated previous paragraph",
+			response: "Here is some unrelated context that never mentions the fix.\n\nkubectl patch deployment inventory-worker --patch '...'",
+			want:     0,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

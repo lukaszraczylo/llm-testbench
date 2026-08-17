@@ -2,60 +2,53 @@ package tests
 
 import "testing"
 
-// wantCatalog is the full 17-test catalog per PLAN.md, id -> {category,
-// subcategory}. TestAll_MatchesCatalog checks the registry against this
-// list exactly, so an accidental removal, duplication, or miscategorized
-// test fails loudly.
-var wantCatalog = map[string][2]string{
-	"go-struct-align":           {"programming", "golang"},
-	"go-worker-pool":            {"programming", "golang"},
-	"go-semver-classify":        {"programming", "golang"},
-	"py-log-triage":             {"programming", "python"},
-	"py-cosine":                 {"programming", "python"},
-	"ts-debounce-composable":    {"programming", "typescript"},
-	"c-struct-size":             {"programming", "c"},
-	"macos-timeout-portability": {"operations", "macos"},
-	"macos-launchd-cron":        {"operations", "macos"},
-	"linux-pct-exec":            {"operations", "linux"},
-	"linux-systemd-oneshot":     {"operations", "linux"},
-	"k8s-crashloop-gitops":      {"operations", "kubernetes"},
-	"web-robots-ai-crawlers":    {"research", "web"},
-	"paper-hnsw-params":         {"research", "whitepapers"},
-	"code-trace-go":             {"research", "codebase"},
-	"agent-tool-routing":        {"agents", "tool-routing"},
-	"agent-plan-ordering":       {"agents", "planning"},
-}
-
-func TestAll_MatchesCatalog(t *testing.T) {
+// TestAll_Invariants checks structural invariants across the whole
+// catalog, rather than an exact id/category/count map (fix 6): four other
+// authors are adding roughly 113 more tests to internal/tests in parallel
+// worktrees, so a fixed catalog size or an exhaustive id list would break
+// on every integration merge for reasons unrelated to a real bug. An
+// exact-catalog check belongs at integration time, once the merge is
+// final, not in a file every parallel author's branch also compiles.
+func TestAll_Invariants(t *testing.T) {
 	r := All()
+	all := r.All()
 
-	if r.Len() != len(wantCatalog) {
-		t.Fatalf("registry has %d tests, want %d", r.Len(), len(wantCatalog))
+	if len(all) == 0 {
+		t.Fatal("catalog is empty")
 	}
 
-	for id, catSub := range wantCatalog {
-		tc, ok := r.Get(id)
-		if !ok {
-			t.Errorf("missing test %q", id)
+	seenIDs := make(map[string]bool, len(all))
+	for _, tc := range all {
+		if tc.ID == "" {
+			t.Error("found a test with an empty ID")
 			continue
 		}
-		if tc.Category != catSub[0] {
-			t.Errorf("%s: Category = %q, want %q", id, tc.Category, catSub[0])
+		if seenIDs[tc.ID] {
+			t.Errorf("duplicate test ID %q", tc.ID)
 		}
-		if tc.Subcategory != catSub[1] {
-			t.Errorf("%s: Subcategory = %q, want %q", id, tc.Subcategory, catSub[1])
+		seenIDs[tc.ID] = true
+
+		if tc.Category == "" {
+			t.Errorf("%s: Category is empty", tc.ID)
+		}
+		if tc.Subcategory == "" {
+			t.Errorf("%s: Subcategory is empty", tc.ID)
 		}
 		if tc.Prompt == "" {
-			t.Errorf("%s: Prompt is empty", id)
-		}
-		if tc.Eval == nil {
-			t.Errorf("%s: Eval is nil", id)
+			t.Errorf("%s: Prompt is empty", tc.ID)
 		}
 		if tc.Description == "" {
-			t.Errorf("%s: Description is empty", id)
+			t.Errorf("%s: Description is empty", tc.ID)
 		}
-		if tc.MaxTokens <= 0 {
-			t.Errorf("%s: MaxTokens = %d, want > 0", id, tc.MaxTokens)
+		if tc.Eval == nil {
+			t.Errorf("%s: Eval is nil", tc.ID)
+		}
+		// MaxTokens == 0 is valid: runner.Runner floors it with
+		// cfg.MaxTokensDefault (max(test.MaxTokens, cfg.MaxTokensDefault)),
+		// so a test need not set its own MaxTokens at all. Only a
+		// negative value is a bug.
+		if tc.MaxTokens < 0 {
+			t.Errorf("%s: MaxTokens = %d, want >= 0", tc.ID, tc.MaxTokens)
 		}
 	}
 }

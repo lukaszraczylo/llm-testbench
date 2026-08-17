@@ -24,10 +24,18 @@ type Request struct {
 // Response is the normalized result of a chat-completion call.
 type Response struct {
 	Text             string
+	FinishReason     string
 	PromptTokens     int
 	CompletionTokens int
 	Latency          time.Duration
 }
+
+// FinishReasonLength is the OpenAI-compatible finish_reason value meaning
+// the model hit its token budget (MaxTokens) before it finished: the
+// response, and Text in particular, may be truncated or empty. A reasoning
+// model that spends its whole budget on internal reasoning before writing
+// anything to the answer channel reports this with Text == "".
+const FinishReasonLength = "length"
 
 // Client completes chat requests against a language model backend.
 // Implementations must be safe for concurrent use.

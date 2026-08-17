@@ -75,6 +75,47 @@ max_tokens_default: 4000
 	}
 }
 
+func TestParse_DefaultsAppliedWhenOmitted(t *testing.T) {
+	yaml := `
+endpoint: https://llm-gateway.example.com/v1
+models:
+  - uni/deepseek-v4-flash-0731
+`
+	cfg, err := parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("parse() error = %v", err)
+	}
+	if cfg.Concurrency != defaultConcurrency {
+		t.Errorf("Concurrency = %d, want default %d", cfg.Concurrency, defaultConcurrency)
+	}
+	if cfg.RequestTimeout != defaultRequestTimeout {
+		t.Errorf("RequestTimeout = %v, want default %v", cfg.RequestTimeout, defaultRequestTimeout)
+	}
+	if cfg.MaxTokensDefault != defaultMaxTokens {
+		t.Errorf("MaxTokensDefault = %d, want default %d", cfg.MaxTokensDefault, defaultMaxTokens)
+	}
+}
+
+func TestParse_DefaultsDoNotOverrideExplicitValues(t *testing.T) {
+	cfg, err := parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("parse() error = %v", err)
+	}
+	// validYAML sets concurrency=4, request_timeout=120s,
+	// max_tokens_default=4000, all below the new defaults; an explicit
+	// value, even a small one, must still win over the default floor
+	// applied by applyDefaults.
+	if cfg.Concurrency != 4 {
+		t.Errorf("Concurrency = %d, want the explicit 4, not the default", cfg.Concurrency)
+	}
+	if cfg.RequestTimeout != 120*time.Second {
+		t.Errorf("RequestTimeout = %v, want the explicit 120s, not the default", cfg.RequestTimeout)
+	}
+	if cfg.MaxTokensDefault != 4000 {
+		t.Errorf("MaxTokensDefault = %d, want the explicit 4000, not the default", cfg.MaxTokensDefault)
+	}
+}
+
 func TestParse_InvalidYAML(t *testing.T) {
 	_, err := parse([]byte("not: [valid: yaml"))
 	if err == nil {
