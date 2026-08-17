@@ -1,6 +1,9 @@
 package tests
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // TestAll_Invariants checks structural invariants across the whole
 // catalog, rather than an exact id/category/count map (fix 6): four other
@@ -49,6 +52,50 @@ func TestAll_Invariants(t *testing.T) {
 		// negative value is a bug.
 		if tc.MaxTokens < 0 {
 			t.Errorf("%s: MaxTokens = %d, want >= 0", tc.ID, tc.MaxTokens)
+		}
+	}
+}
+
+// TestAll_SubcategoryMinimums pins the post-expansion catalog shape: every
+// subcategory holds at least minTestsPerSubcategory tests, and exactly the
+// expected category/subcategory pairs exist (no strays from a typo in a
+// registration).
+func TestAll_SubcategoryMinimums(t *testing.T) {
+	const minTestsPerSubcategory = 10
+
+	wantSubcats := map[string][]string{
+		"programming": {"golang", "python", "typescript", "c"},
+		"operations":  {"macos", "linux", "kubernetes"},
+		"research":    {"web", "whitepapers", "codebase"},
+		"agents":      {"tool-routing", "planning", "delegation"},
+	}
+
+	counts := make(map[string]map[string]int)
+	for _, tc := range All().All() {
+		if counts[tc.Category] == nil {
+			counts[tc.Category] = make(map[string]int)
+		}
+		counts[tc.Category][tc.Subcategory]++
+	}
+
+	for cat, subcats := range wantSubcats {
+		for _, sub := range subcats {
+			if n := counts[cat][sub]; n < minTestsPerSubcategory {
+				t.Errorf("%s/%s: %d tests, want >= %d", cat, sub, n, minTestsPerSubcategory)
+			}
+		}
+	}
+
+	for cat, subs := range counts {
+		want, ok := wantSubcats[cat]
+		if !ok {
+			t.Errorf("unexpected category %q", cat)
+			continue
+		}
+		for sub := range subs {
+			if !slices.Contains(want, sub) {
+				t.Errorf("unexpected subcategory %s/%s", cat, sub)
+			}
 		}
 	}
 }
