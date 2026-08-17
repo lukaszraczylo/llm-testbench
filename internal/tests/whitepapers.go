@@ -7,6 +7,15 @@ import (
 
 func registerWhitepapersTests(r *testkit.Registry) {
 	r.Register(paperHnswParamsTest())
+	r.Register(paperPQCompressionRatioTest())
+	r.Register(paperBloomFPRateTest())
+	r.Register(paperTFIDFTermScoreTest())
+	r.Register(paperRecallAtKTest())
+	r.Register(paperLSMWriteAmplificationTest())
+	r.Register(paperRaftQuorumFailuresTest())
+	r.Register(paperBTreeHeightLevelsTest())
+	r.Register(paperCAPAvailabilityChoiceTest())
+	r.Register(paperAttentionScaleFactorTest())
 }
 
 // paperHnswParamsExcerpt is a ~150-word, technically accurate original
