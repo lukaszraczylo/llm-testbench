@@ -6,13 +6,20 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
     name: Version, tag, and release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -21,7 +28,7 @@ jobs:
 
       - name: Calculate semantic version
         id: semver
-        uses: lukaszraczylo/semver-generator@v1.17.18
+        uses: lukaszraczylo/semver-generator@b5eb8ae15a62d76e81dc4661a49209a8502cf1d3 # v1.17.18
         with:
           config_file: semver.yaml
           repository_local: true
@@ -55,15 +62,15 @@ jobs:
 
       - name: Set up QEMU
         if: steps.tag.outputs.new == 'true'
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
         if: steps.tag.outputs.new == 'true'
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GitHub Container Registry
         if: steps.tag.outputs.new == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -71,7 +78,7 @@ jobs:
 
       - name: Run goreleaser
         if: steps.tag.outputs.new == 'true'
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           version: "~> v2"
