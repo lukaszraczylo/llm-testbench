@@ -19,5 +19,9 @@ func All() *testkit.Registry {
 	registerWhitepapersTests(r)
 	registerCodebaseTests(r)
 	registerAgentsTests(r)
+	registerDatabasesTests(r)
+	registerSecurityTests(r)
+	registerDeliveryTests(r)
+	registerAITests(r)
 	return r
 }

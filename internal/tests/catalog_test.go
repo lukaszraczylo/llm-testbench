@@ -68,6 +68,10 @@ func TestAll_SubcategoryMinimums(t *testing.T) {
 		"operations":  {"macos", "linux", "kubernetes"},
 		"research":    {"web", "whitepapers", "codebase"},
 		"agents":      {"tool-routing", "planning", "delegation"},
+		"databases":   {"postgres", "redis", "sql-tuning"},
+		"security":    {"appsec", "crypto", "secrets"},
+		"delivery":    {"git", "containers", "release-engineering"},
+		"ai":          {"vector-search", "llm-integration", "rag"},
 	}
 
 	counts := make(map[string]map[string]int)
