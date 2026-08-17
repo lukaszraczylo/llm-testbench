@@ -492,7 +492,9 @@ printed, nothing else.`
 		Subcategory: "golang",
 		Description: "Trace the exact output of a context cancellation propagating synchronously from a parent to a derived context.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("context canceled"),
+		// A7: eval.ExactToken so a fenced or quoted rendering of the exact
+		// printed text still scores full credit.
+		Eval: eval.ExactToken("context canceled"),
 	}
 }
 

@@ -163,6 +163,28 @@ func TestTsGenericUtilityTypeTest_Eval(t *testing.T) {
 		{"correct recursive DeepPartial", goodDeepPartial, 1},
 		{"wrong: shallow only, no recursion into nested objects", missingRecursion, 0.75}, // (2*1 + 1*0 + 1*1)/4: mapped type ok, no DeepPartial<T[K]> reference, no any
 		{"wrong: uses any, defeating the point", usesAny, 0.5},                            // (2*1 + 1*0 + 1*0)/4: mapped type ok, no recursion, uses any
+		{
+			// A9: "P" (TypeScript's own Partial<T> convention) is an
+			// equally valid mapped-type variable name to "K" - the
+			// recursive-reference check must not hardcode the literal
+			// identifier.
+			name: "correct recursive DeepPartial using P instead of K as the mapped-type variable (A9 bug probe)",
+			response: "```ts\n" + `type DeepPartial<T> = {
+  [P in keyof T]?: T[P] extends object ? DeepPartial<T[P]> : T[P];
+};
+` + "```",
+			want: 1,
+		},
+		{
+			// A9: "keyof T" with extra internal whitespace is the same
+			// requirement, just formatted differently.
+			name: "correct recursive DeepPartial with extra whitespace around keyof T (A9 bug probe)",
+			response: "```ts\n" + `type DeepPartial<T> = {
+  [K in keyof   T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
+};
+` + "```",
+			want: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -287,6 +309,14 @@ export default defineConfig([
 ]);
 ` + "```"
 
+	goodFlatConfigCommonJS := "```js\n" + `module.exports = [
+  {
+    languageOptions: { ecmaVersion: "latest", sourceType: "module" },
+    rules: { semi: "error", "prefer-const": "error" },
+  },
+];
+` + "```"
+
 	stillLegacyFormat := "```json\n" + tsOldEslintrcConfig + "\n```"
 
 	tests := []struct {
@@ -296,6 +326,7 @@ export default defineConfig([
 	}{
 		{"good: plain array export default", goodFlatConfig, 1},
 		{"good: defineConfig helper", goodFlatConfigWithHelper, 1},
+		{"good: CommonJS module.exports form is equally valid flat config (A8 bug probe)", goodFlatConfigCommonJS, 1},
 		{"wrong: left as legacy .eslintrc JSON", stillLegacyFormat, 0},
 	}
 	for _, tt := range tests {
@@ -400,6 +431,10 @@ func TestTsOptionalChainingNullishTraceTest_Eval(t *testing.T) {
 		{"exact correct", "localhost:0", 1},
 		{"correct with surrounding whitespace", "  localhost:0  ", 1},
 		{"correct case-insensitive", "LOCALHOST:0", 1},
+		// A7 regression: fenced/quoted decoration on the correct answer
+		// must still score full credit.
+		{"fenced", "```\nlocalhost:0\n```", 1},
+		{"quoted with trailing period", `"localhost:0".`, 1},
 		{"wrong: treats ?? like || and replaces the falsy 0", "localhost:8080", 0},
 		{"wrong: assumes host is present", "example.com:0", 0},
 	}

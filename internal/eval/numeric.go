@@ -18,12 +18,17 @@ type Number interface {
 }
 
 // digitPattern matches unsigned integers and decimals, including a
-// leading-dot form with no integer part (".9896"). Longer alternatives are
-// listed first so the match is not truncated to just the integer part of
-// "0.9896" or just the dot-less ".9896". It deliberately excludes the sign:
-// classifyMatch decides, per match, whether a leading '-' in the source
-// text is a real minus sign or a compound-word hyphen ("x86-64").
-var digitPattern = regexp.MustCompile(`\d+\.\d+|\.\d+|\d+`)
+// comma-grouped thousands form ("50,000", "1,234.5") and a leading-dot form
+// with no integer part (".9896"). Longer/more specific alternatives are
+// listed first so the match is not truncated to just "50" out of "50,000",
+// or just the integer part of "0.9896", or just the dot-less ".9896". The
+// comma-group alternative requires groups of exactly 3 digits after the
+// first comma (`\d{1,3}(?:,\d{3})+`), so it does not misfire on an
+// unrelated comma followed by a differently-sized number ("in 2024, 50
+// states"). It deliberately excludes the sign: classifyMatch decides, per
+// match, whether a leading '-' in the source text is a real minus sign or
+// a compound-word hyphen ("x86-64").
+var digitPattern = regexp.MustCompile(`\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\.\d+|\d+`)
 
 // isWordByte reports whether b is a letter, digit, or underscore - the
 // standard regex \w character class - used to detect a digit run glued
@@ -47,6 +52,11 @@ type numberCandidate struct {
 	compoundHyphen bool
 }
 
+// isDigitByte reports whether b is an ASCII digit.
+func isDigitByte(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
 // classifyMatch inspects the characters immediately surrounding the
 // unsigned digit run text[start:end] and classifies it:
 //
@@ -56,9 +66,14 @@ type numberCandidate struct {
 //   - a '-' immediately before the run is a real minus sign only when the
 //     character before THAT is not alphanumeric, so "x86-64" does not read
 //     as "x86" followed by the negative number -64;
+//   - a digit run immediately preceded by ':' whose own left neighbour is
+//     a digit is the second term of a ratio ("64:1"'s "1") and is never a
+//     real candidate, at any tier, so extraction lands on the first term;
 //   - a number joined by a hyphen to an adjacent word on either side
 //     ("64-bit", "8-byte", the "64" in "x86-64" once its bogus sign is
-//     stripped) is flagged compoundHyphen rather than rejected outright.
+//     stripped) is flagged compoundHyphen rather than rejected outright;
+//   - a comma-grouped literal ("50,000", "1,234.5") has its commas
+//     stripped so the returned literal parses with strconv.ParseFloat.
 func classifyMatch(text string, start, end int) (numberCandidate, bool) {
 	literal := text[start:end]
 
@@ -72,6 +87,9 @@ func classifyMatch(text string, start, end int) (numberCandidate, bool) {
 
 	if start > 0 && isWordByte(text[start-1]) {
 		return numberCandidate{}, false // e.g. the "64" in "LP64"
+	}
+	if start > 0 && text[start-1] == ':' && start-2 >= 0 && isDigitByte(text[start-2]) {
+		return numberCandidate{}, false // e.g. the "1" in "64:1"
 	}
 	if end < len(text) && isWordByte(text[end]) {
 		// Permit a multiplier suffix ("64x" = 64 times): a single trailing
@@ -90,6 +108,7 @@ func classifyMatch(text string, start, end int) (numberCandidate, bool) {
 		compound = true // e.g. "64-bit", "24-byte"
 	}
 
+	literal = strings.ReplaceAll(literal, ",", "")
 	return numberCandidate{literal: literal, compoundHyphen: compound}, true
 }
 

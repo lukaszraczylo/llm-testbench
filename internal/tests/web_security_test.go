@@ -14,8 +14,17 @@ func TestWebCORSMissingHeaderTest_Eval(t *testing.T) {
 		want     float64
 	}{
 		{"bare header name", "Access-Control-Allow-Headers", 1},
-		{"with a colon", "Access-Control-Allow-Headers:", 1},
-		{"in a sentence", "The missing header is Access-Control-Allow-Headers.", 1},
+		{"quoted", `"Access-Control-Allow-Headers"`, 1},
+		{"bolded", "**Access-Control-Allow-Headers**", 1},
+		{"trailing period", "Access-Control-Allow-Headers.", 1},
+		// B5: ExactToken anchors to the whole normalized answer, per the
+		// prompt's own "Respond with only the header name, nothing else" -
+		// a colon is extra content beyond the header name, and a
+		// sentence wrapping the name is not the forced bare-answer format
+		// either; both now correctly score 0 rather than matching as a
+		// substring anywhere in the response.
+		{"with a colon: extra content, not the bare name", "Access-Control-Allow-Headers:", 0},
+		{"in a sentence: extra words break the forced format", "The missing header is Access-Control-Allow-Headers.", 0},
 		{"wrong: names an already-present header", "Access-Control-Allow-Origin", 0},
 		{"wrong: names an already-present header", "Access-Control-Allow-Methods", 0},
 	}

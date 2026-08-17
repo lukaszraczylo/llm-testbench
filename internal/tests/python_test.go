@@ -254,6 +254,10 @@ func TestPyMutableDefaultArgTest_Eval(t *testing.T) {
 		{"exact correct", "[1, 2, 3]", 1},
 		{"correct with surrounding whitespace", "  [1, 2, 3]  ", 1},
 		{"correct with trailing newline", "[1, 2, 3]\n", 1},
+		// A7 regression: fenced/quoted decoration on the correct answer
+		// must still score full credit.
+		{"fenced", "```\n[1, 2, 3]\n```", 1},
+		{"quoted", `"[1, 2, 3]"`, 1},
 		{"wrong: assumes a fresh list per call", "[3]", 0},
 		{"wrong: only counts explicit-arg calls", "[1, 2]", 0},
 	}
@@ -293,6 +297,9 @@ func TestPyDictComprehensionTraceTest_Eval(t *testing.T) {
 		{"exact correct", "[('apple', 5), ('banana', 6), ('cherry', 6), ('date', 4)]", 1},
 		{"correct with surrounding whitespace", "  [('apple', 5), ('banana', 6), ('cherry', 6), ('date', 4)]  ", 1},
 		{"correct uppercase-folded", "[('APPLE', 5), ('BANANA', 6), ('CHERRY', 6), ('DATE', 4)]", 1},
+		// A7 regression: fenced decoration on the correct answer must
+		// still score full credit.
+		{"fenced", "```\n[('apple', 5), ('banana', 6), ('cherry', 6), ('date', 4)]\n```", 1},
 		{"wrong: includes fig, forgets the length filter", "[('apple', 5), ('banana', 6), ('cherry', 6), ('date', 4), ('fig', 3)]", 0},
 		{"wrong: unsorted, dict insertion order", "[('apple', 5), ('banana', 6), ('cherry', 6), ('fig', 3), ('date', 4)]", 0},
 	}
@@ -331,6 +338,10 @@ func TestPyGeneratorExhaustionTraceTest_Eval(t *testing.T) {
 		{"exact correct", "[0, 1, 2] []", 1},
 		{"correct with surrounding whitespace", "  [0, 1, 2] []  ", 1},
 		{"correct with trailing newline", "[0, 1, 2] []\n", 1},
+		// A7 regression: fenced/quoted decoration on the correct answer
+		// must still score full credit.
+		{"fenced", "```\n[0, 1, 2] []\n```", 1},
+		{"quoted", `"[0, 1, 2] []"`, 1},
 		{"wrong: assumes the generator restarts", "[0, 1, 2] [0, 1, 2]", 0},
 		{"wrong: assumes an error is raised and printed", "StopIteration", 0},
 	}
@@ -370,6 +381,13 @@ def find_configs(base_dir):
     return [str(p) for p in Path(base_dir).glob("*.yaml")]
 ` + "```"
 
+	goodRewriteGlobRecursiveWildcard := "```python\n" + `from pathlib import Path
+
+
+def find_configs(base_dir):
+    return [str(p) for p in Path(base_dir).glob("**/*.yaml")]
+` + "```"
+
 	tests := []struct {
 		name     string
 		response string
@@ -378,7 +396,8 @@ def find_configs(base_dir):
 		{"good rewrite: from pathlib import Path", goodRewrite, 1},
 		{"good rewrite: import pathlib", goodRewriteAltImport, 1},
 		{"wrong: unchanged os.path/os.walk code", stillUsesOsPath, 0},
-		{"partial: uses pathlib but non-recursive glob, not rglob", missingRglob, 2.0 / 3.0}, // (1*1 + 2*0.5)/3: ContainsAny hits, ContainsAll("rglob","*.yaml") matches only "*.yaml"
+		{"partial: uses pathlib but non-recursive glob, not rglob", missingRglob, 2.0 / 3.0}, // (1*1 + 1*0 + 1*1)/3: pathlib import ok, neither rglob nor glob("**/ present, *.yaml ok
+		{"good rewrite: glob(\"**/*.yaml\") is behaviorally equivalent to rglob (A16 bug probe)", goodRewriteGlobRecursiveWildcard, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

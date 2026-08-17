@@ -32,6 +32,9 @@ func TestPaperPQCompressionRatioTest_Eval(t *testing.T) {
 	}{
 		{"correct", "64", 1},
 		{"prose wrapped", "The compression ratio is 64x.", 1},
+		// B6: ratio notation must extract the first term (64), not the
+		// second (the "1" of "64:1").
+		{"ratio notation", "64:1", 1},
 		{"wrong", "8", 0},
 	}
 	for _, tt := range tests {

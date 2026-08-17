@@ -479,6 +479,10 @@ func TestGoContextCancellationTraceTest_Eval(t *testing.T) {
 		{"exact correct", "context canceled", 1},
 		{"correct case-insensitive", "CONTEXT CANCELED", 1},
 		{"correct with surrounding whitespace", "  context canceled  ", 1},
+		// A7 regression: fenced/quoted decoration on the correct answer
+		// must still score full credit.
+		{"fenced", "```\ncontext canceled\n```", 1},
+		{"quoted with trailing period", `"context canceled".`, 1},
 		{"wrong: assumes select falls to default", "not done", 0},
 		{"wrong: wrong sentinel error", "context deadline exceeded", 0},
 	}

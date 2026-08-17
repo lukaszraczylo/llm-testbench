@@ -477,21 +477,25 @@ Respond with only a JSON object: {"next_action":"..."}`
 //
 // ground truth: prep_env finishes on day 0+3=3, prep_data finishes on day
 // 0+5=5. Milestone M cannot start until BOTH finish, so M starts on
-// max(3,5)=5, and finishes 2 days later, on day 5+2=7.
+// max(3,5)=5, and finishes 2 days later, on day 5+2=7. B7: the prompt now
+// states the t+d finish-day rule explicitly rather than relying on a
+// "day 0" framing a reader could also read as 1-indexed (which would make
+// 6 a defensible, if unintended, answer); 7 remains the only correct one.
 var planMilestoneWant = max(3, 5) + 2
 
 func planMilestoneDateTest() testkit.Test {
-	prompt := `Two prerequisite work items both start on day 0 and run in
-parallel:
+	prompt := `Two prerequisite work items run in parallel, starting at day 0:
 - prep_env takes 3 days.
 - prep_data takes 5 days.
 
 Milestone M can only start once BOTH prep_env and prep_data have finished,
 and M itself takes 2 days once it starts.
 
-On what day number does milestone M finish (counting the day work starts
-as day 0, and each duration in whole days with no gaps)? Respond with only
-the number.`
+Use this rule: a task starting at day t with duration d finishes at day
+t+d. Work starts at day 0.
+
+On what day number does milestone M finish? Respond with only the
+number.`
 
 	return testkit.Test{
 		ID:          "agent-plan-milestone-date",

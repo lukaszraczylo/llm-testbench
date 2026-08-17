@@ -349,7 +349,10 @@ spec:
 // app=inventory-api-svc - a value that matches no pod's labels, so the
 // Service has zero Endpoints. The single wrong field is the Service's
 // spec.selector.app value; it must be changed to "inventory-api" to match
-// the pods.
+// the pods. The prompt's JSON template pre-fills "field":"selector.app"
+// as part of the requested response shape, so a model that never
+// diagnosed the field at all could still copy that value verbatim; only
+// "value" is actually evidence the model found the fix (AN2).
 func k8sServiceSelectorMismatchTest() testkit.Test {
 	prompt := `Requests to this Service time out with no available
 endpoints. Here is the Deployment's pod template and the Service:
@@ -360,10 +363,7 @@ Which single field in the Service YAML is wrong, and what value should it
 be changed to so the Service's Endpoints include these pods? Respond with
 only a JSON object: {"field":"selector.app","value":"<correct value>"}`
 
-	evaluator := eval.Mean(
-		eval.JSONField("field", "selector.app"),
-		eval.JSONField("value", "inventory-api"),
-	)
+	evaluator := eval.JSONField("value", "inventory-api")
 
 	return testkit.Test{
 		ID:          "k8s-service-selector-mismatch",
@@ -510,8 +510,11 @@ const k8sTraefikIngressRouteYAML = "apiVersion: traefik.io/v1alpha1\n" +
 	"          port: 80"
 
 // k8sTraefikIngressRoutePattern requires the corrected match expression,
-// with the backtick-quoted domain exactly matching app.raczylo.com.
-const k8sTraefikIngressRoutePattern = "(?i)host\\(`app\\.raczylo\\.com`\\)"
+// with the domain app.raczylo.com quoted with either backticks (Traefik's
+// own matcher syntax, as shown in the prompt's example) or double quotes
+// (a common, equally unambiguous way a model renders the same literal)
+// (AN4).
+const k8sTraefikIngressRoutePattern = "(?i)host\\([`\"]app\\.raczylo\\.com[`\"]\\)"
 
 // k8sTraefikIngressRouteHostTest: correct a Traefik IngressRoute's Host()
 // match rule to the actual domain the service must answer for.
@@ -581,7 +584,10 @@ BestEffort.`
 		Subcategory: "kubernetes",
 		Description: "Derive a pod's QoS class (Burstable) from requests that are set but not equal to limits.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("Burstable"),
+		// A7: eval.ExactToken (not eval.Equals) so a fenced, quoted, or
+		// bolded "Burstable" - a common way a model formats a forced
+		// one-word answer - still scores full credit.
+		Eval: eval.ExactToken("Burstable"),
 	}
 }
 
@@ -600,10 +606,15 @@ with what minimum value, to enforce "at least 2 available"?`
 	// bounds voluntary disruptions (like a node drain evicting pods) for a
 	// selected set of pods. Setting its minAvailable field to 2 enforces
 	// that at least 2 of the 3 Postgres pods must remain available before
-	// the eviction API will permit another one to be drained.
+	// the eviction API will permit another one to be drained. The
+	// minAvailable check is a single regex tolerant of any short
+	// same-line phrasing between the key and the value (A10) - e.g.
+	// "minAvailable is set to 2" or "minAvailable: \"2\"" - rather than an
+	// enumerated list of exact phrasings that misses anything not on the
+	// list.
 	evaluator := eval.Mean(
 		eval.ContainsAll("PodDisruptionBudget"),
-		eval.ContainsAny("minAvailable: 2", "minAvailable=2", "minAvailable 2", "minAvailable of 2"),
+		eval.Regex(`(?i)minAvailable\b[^\n]{0,20}\b2\b`),
 	)
 
 	return testkit.Test{

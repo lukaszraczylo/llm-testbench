@@ -120,6 +120,39 @@ func TestCodeTraceTSWant_GroundTruth(t *testing.T) {
 	if got != codeTraceTSWant {
 		t.Errorf("codeTSPackTrace(%v) = %q, want %q", items, got, codeTraceTSWant)
 	}
+
+	// BN4: cross-check against a real JS engine too, not just the Go
+	// replica above. node cannot execute codeTraceTSSource's TypeScript
+	// type annotations directly, so this is the same logic with the two
+	// annotations (": number[]", ": string") stripped - everything else,
+	// including the reduce/ternary/toString(2) logic under test, is
+	// identical source.
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not found on PATH, skipping exec ground-truth cross-check")
+	}
+
+	const jsSource = `function pack(items) {
+  return items.reduce((acc, x, i) => {
+    if (i % 2 === 0) return acc + x;
+    return acc + x * 2;
+  }, 0).toString(2);
+}
+console.log(pack([3, 4, 5, 6, 7]));
+`
+	// #nosec G204 -- jsSource is a fixed, hardcoded string (the TS source
+	// embedded in the prompt with its two type annotations stripped), not
+	// external or response-controlled input.
+	cmd := exec.Command("node", "-e", jsSource) //nolint:gosec // see comment above
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("running node ground-truth script failed: %v", err)
+	}
+	nodeGot := strings.TrimSpace(stdout.String())
+	if nodeGot != codeTraceTSWant {
+		t.Errorf("node-computed pack([3,4,5,6,7]) = %q, want %q", nodeGot, codeTraceTSWant)
+	}
 }
 
 func TestCodeTraceTSTest_Eval(t *testing.T) {

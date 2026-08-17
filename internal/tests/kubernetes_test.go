@@ -238,7 +238,12 @@ func TestK8sServiceSelectorMismatchTest_Eval(t *testing.T) {
 		{"prose then JSON", "The selector doesn't match the pod labels.\n" + `{"field":"selector.app","value":"inventory-api"}`, 1},
 		{"fenced JSON", "```json\n" + `{"field":"selector.app","value":"inventory-api"}` + "\n```", 1},
 		{"points at the wrong field (targetPort instead of selector)", `{"field":"targetPort","value":"8080"}`, 0},
-		{"right field, wrong replacement value", `{"field":"selector.app","value":"inventory-api-svc"}`, 0.5},
+		// AN2: only "value" is graded, since the prompt's own JSON template
+		// pre-fills "field":"selector.app" - copying that back verbatim is
+		// not evidence of diagnosis, so it no longer earns partial credit
+		// on its own (this case used to score 0.5).
+		{"right field, wrong replacement value", `{"field":"selector.app","value":"inventory-api-svc"}`, 0},
+		{"field name wrong but value correct still scores full credit (AN2 bug probe)", `{"field":"wrongfield","value":"inventory-api"}`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -327,6 +332,7 @@ func TestK8sTraefikIngressRouteHostTest_Eval(t *testing.T) {
 		{"uppercase Host keyword variant", "MATCH: HOST(`app.raczylo.com`)", 1},
 		{"still the old domain", "match: Host(`app.example.com`)", 0},
 		{"right function, wrong domain typo", "match: Host(`app.raczlo.com`)", 0},
+		{"double-quoted domain (AN4 bug probe)", `match: Host("app.raczylo.com")`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -349,6 +355,11 @@ func TestK8sQoSClassTest_Eval(t *testing.T) {
 		{"exact word", "Burstable", 1},
 		{"lowercase", "burstable", 1},
 		{"trailing whitespace", "Burstable\n", 1},
+		// A7 regression: fenced/quoted/bolded/trailing-period decoration
+		// on the correct answer must still score full credit.
+		{"fenced", "```\nBurstable\n```", 1},
+		{"quoted", `"Burstable"`, 1},
+		{"bolded with period", "**Burstable**.", 1},
 		{"wrong class, mistakes it for Guaranteed", "Guaranteed", 0},
 		{"wrong class, mistakes it for BestEffort", "BestEffort", 0},
 	}
@@ -375,6 +386,8 @@ func TestK8sCNPGPDBTest_Eval(t *testing.T) {
 		{"english phrasing of the value", "Create a PodDisruptionBudget with a minAvailable of 2.", 1},
 		{"wrong resource entirely (a NetworkPolicy cannot do this)", "Use a NetworkPolicy with minAvailable: 2.", 0.5},
 		{"right resource, wrong/missing value", "Use a PodDisruptionBudget, but leave the fields at their defaults.", 0.5},
+		{"'set to' phrasing, not covered by the old enumerated substring list (A10 bug probe)", "Use a PodDisruptionBudget with minAvailable set to 2.", 1},
+		{"quoted numeric value in YAML (A10 bug probe)", `Use a PodDisruptionBudget with minAvailable: "2".`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

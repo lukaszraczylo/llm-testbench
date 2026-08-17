@@ -164,6 +164,11 @@ func TestPaperCAPAvailabilityChoiceTest_Eval(t *testing.T) {
 		{"correct with trailing period", "Availability.", 1},
 		{"wrong: consistency", "Consistency", 0},
 		{"wrong: extra words break the forced one-word format", "The answer is availability", 0},
+		// B2: the prompt's own phrasing quotes the two options, so a
+		// quoted or bolded answer must still score full credit.
+		{"correct, quoted (prompt's own phrasing)", `"Availability"`, 1},
+		{"correct, bolded", "**Availability**", 1},
+		{"correct, quoted with trailing period", `"Availability".`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

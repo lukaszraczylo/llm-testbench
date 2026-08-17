@@ -35,6 +35,19 @@ func TestExtractLastNumber(t *testing.T) {
 		// the last standalone number, which here is not the answer a
 		// human would pick. Prompts should ask for the number alone.
 		{"ambiguous parenthetical breakdown returns the wrong number by design", "Total: 24 bytes (22 bytes of members plus 2 tail padding)", 2, false},
+		// B1: comma-grouped thousands separators.
+		{"comma-grouped thousands", "50,000", 50000, false},
+		{"comma-grouped thousands with unit", "50,000 URLs", 50000, false},
+		{"comma-grouped thousands in a sentence", "The limit is 50,000.", 50000, false},
+		{"comma-grouped with a decimal tail", "1,234.5", 1234.5, false},
+		{"comma-grouped, multiple groups", "12,345,678", 12345678, false},
+		{"unrelated comma is not a thousands group", "in 2024, 50 states voted", 50, false},
+		// B6: ratio form "N:M" must extract the first term, not the second.
+		{"ratio form extracts the first term", "64:1", 64, false},
+		// Documented limitation, not a regression (B6): the word-form ratio
+		// is not cheaply distinguishable from two unrelated numbers, so
+		// this pins the current (non-ideal) behaviour deliberately.
+		{"word-form ratio is a documented limitation, not fixed", "The ratio is 64 to 1.", 1, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

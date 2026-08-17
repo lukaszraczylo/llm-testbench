@@ -1,6 +1,10 @@
 package tests
 
 import (
+	"context"
+	"fmt"
+	"regexp"
+
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
@@ -157,8 +161,26 @@ const codeDedupSnippet = `func Dedup(a []int) []int {
 
 // codeBigODedupPattern accepts every common notation for O(n^2): a caret,
 // a double-star, the unicode superscript two, or n*n, each optionally
-// wrapped as O(...) with flexible internal spacing.
-const codeBigODedupPattern = `(?i)o\(\s*n\s*(\^\s*2|\*\*\s*2|²|\*\s*n)\s*\)`
+// wrapped as O(...) with flexible internal spacing. Anchored to the whole
+// string (codeBigODedupEval matches it against the whole normalized
+// response, never a substring), so "not O(n^2), it's O(n)" - which
+// contains the literal substring "O(n^2)" - correctly fails (B5) instead
+// of matching the way an unanchored eval.Regex would.
+var codeBigODedupPattern = regexp.MustCompile(`(?i)^o\(\s*n\s*(\^\s*2|\*\*\s*2|²|\*\s*n)\s*\)$`)
+
+// codeBigODedupEval anchors eval.NormalizeExactToken's normalization (fence
+// extraction, quote/asterisk/period stripping) to codeBigODedupPattern,
+// combining "accept several equivalent notations" with "match the whole
+// answer, not a substring anywhere in it."
+func codeBigODedupEval() eval.Evaluator {
+	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
+		normalized := eval.NormalizeExactToken(response)
+		if codeBigODedupPattern.MatchString(normalized) {
+			return eval.Score{Value: 1, Detail: fmt.Sprintf("matches O(n^2) notation: %q", normalized)}
+		}
+		return eval.Score{Value: 0, Detail: fmt.Sprintf("does not match O(n^2) notation: %q", normalized)}
+	})
+}
 
 // codeBigODedupTest: state the worst-case time complexity of an inline
 // nested-loop deduplication function.
@@ -181,7 +203,7 @@ terms of n = len(a)? Respond with only the Big-O expression, e.g. O(n).`
 		Subcategory: "codebase",
 		Description: "State the worst-case Big-O time complexity of an inline nested-loop deduplication function.",
 		Prompt:      prompt,
-		Eval:        eval.Regex(codeBigODedupPattern),
+		Eval:        codeBigODedupEval(),
 	}
 }
 

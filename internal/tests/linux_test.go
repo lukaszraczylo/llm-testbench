@@ -138,8 +138,16 @@ func TestLinuxJournalctlFilterTest_Eval(t *testing.T) {
 		{"quoted negative window", `journalctl -u nginx.service --since "-2 hours"`, 1},
 		{"english phrasing window", `journalctl -u nginx.service --since "2 hours ago"`, 1},
 		{"compact -2h form, no quotes", `Run: journalctl -u nginx.service --since -2h`, 1},
-		{"wrong unit", `journalctl -u apache.service --since "-2 hours"`, 0},
-		{"missing unit filter entirely", `journalctl --since "-2 hours"`, 0},
+		// The unit and since checks are independent (A3): a response that
+		// nails one but not the other now earns that check's half-credit
+		// rather than scoring 0 outright, the same partial-credit
+		// convention eval.All already uses elsewhere in this file.
+		{"wrong unit still credits the correct since-window", `journalctl -u apache.service --since "-2 hours"`, 0.5},
+		{"missing unit filter still credits the correct since-window", `journalctl --since "-2 hours"`, 0.5},
+		{"missing both filters entirely scores 0", `journalctl -f`, 0},
+		{"long-form --unit= (A3 bug probe)", `journalctl --unit=nginx.service --since=-2h`, 1},
+		{"short-form -S (A3 bug probe)", `journalctl -u nginx.service -S -2h`, 1},
+		{"since option before unit option, order-free (A3 bug probe)", `journalctl --since "-2 hours" -u nginx.service`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -208,6 +216,11 @@ func TestLinuxNftablesDNATTest_Eval(t *testing.T) {
 			response: `iptables -t nat -A OUTPUT -p tcp --dport 8080 -j DNAT --to-destination 10.0.5.20:80`,
 			want:     0,
 		},
+		{
+			name:     "-A PREROUTING given before -t nat is equally valid iptables syntax (A12 bug probe)",
+			response: `iptables -A PREROUTING -t nat -p tcp --dport 8080 -j DNAT --to-destination 10.0.5.20:80`,
+			want:     1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -254,8 +267,13 @@ func TestLinuxSSHPortForwardTest_Eval(t *testing.T) {
 		{"loopback IP form", `ssh -L 15432:127.0.0.1:5432 ops@db1.internal`, 1},
 		{"localhost form", `ssh -L 15432:localhost:5432 ops@db1.internal`, 1},
 		{"extra flags before -L", `ssh -N -L 15432:127.0.0.1:5432 ops@db1.internal`, 1},
-		{"wrong local port", `ssh -L 5432:127.0.0.1:5432 ops@db1.internal`, 0},
-		{"wrong host", `ssh -L 15432:127.0.0.1:5432 ops@db2.internal`, 0},
+		// The forward-spec and destination checks are independent (A6):
+		// getting one right and the other wrong now earns that check's
+		// half-credit instead of scoring 0 outright.
+		{"wrong local port still credits the correct destination", `ssh -L 5432:127.0.0.1:5432 ops@db1.internal`, 0.5},
+		{"wrong host still credits the correct forward spec", `ssh -L 15432:127.0.0.1:5432 ops@db2.internal`, 0.5},
+		{"destination given before -L, options-after-destination (A6 bug probe)", `ssh ops@db1.internal -L 15432:127.0.0.1:5432`, 1},
+		{"-l user form for the destination (A6 bug probe)", `ssh -L 15432:127.0.0.1:5432 -l ops db1.internal`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -280,6 +298,8 @@ func TestLinuxCronExpressionTest_Eval(t *testing.T) {
 		{"tab-separated fields", "30\t3\t*\t*\t1", 1},
 		{"wrong day of week", "30 3 * * 2", 0},
 		{"wrong time", "45 3 * * 1", 0},
+		{"fenced code block, no language tag (A5 bug probe)", "```\n30 3 * * 1\n```", 1},
+		{"fenced code block with a language tag (A5 bug probe)", "```cron\n30 3 * * 1\n```", 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -326,6 +346,16 @@ WantedBy=timers.target.`,
 			response: `Just add a backup.service and backup.timer, and enable it with WantedBy=multi-user.target.`,
 			want:     1.0 / 3.0,
 		},
+		{
+			name:     "WantedBy with a colon separator (A15 bug probe)",
+			response: `backup.service + backup.timer, OnCalendar=*-*-* 02:00:00, WantedBy: timers.target`,
+			want:     1,
+		},
+		{
+			name:     "WantedBy phrased as 'set to' in prose (A15 bug probe)",
+			response: `Use backup.service and backup.timer. OnCalendar=02:00 daily. WantedBy is set to timers.target under [Install].`,
+			want:     1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -350,6 +380,8 @@ func TestLinuxProcMeminfoAvailableTest_Eval(t *testing.T) {
 		{"with unit suffix", "9644 MB", 1},
 		{"divided by 1000 instead of 1024", "9876", 0},
 		{"used MemFree instead of MemAvailable", "1000", 0},
+		{"off-by-one must not pass now that tolerance is 0, not 1 (A17 bug probe)", "9645", 0},
+		{"off-by-one the other direction must not pass (A17 bug probe)", "9643", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

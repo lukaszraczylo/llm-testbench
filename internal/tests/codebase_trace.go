@@ -1,34 +1,25 @@
 package tests
 
 import (
-	"context"
-	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
 
 // codeExactAnswer returns an Evaluator awarding full credit when the
-// response, trimmed of whitespace, at most one layer of surrounding quote
-// characters (' , ", or `), and a single trailing sentence-ending period,
-// equals want case-insensitively. This accepts every materially-correct
-// form of a forced single-token answer (bare, quoted, differently-cased,
-// or with trailing punctuation) without loosening the match to accept a
-// substring of a longer, wrong answer.
+// response equals want under eval.ExactToken's normalization: a fenced
+// code block extracted if present, whitespace trimmed, one layer of
+// surrounding quote/backtick/asterisk decoration stripped, one trailing
+// sentence-ending period stripped, compared case-insensitively. This
+// accepts every materially-correct form of a forced single-token answer
+// (bare, quoted, bolded, fenced, differently-cased, or with trailing
+// punctuation) without loosening the match to accept a substring of a
+// longer, wrong answer. Kept as a thin wrapper (rather than calling
+// eval.ExactToken directly at each call site) so this file's intent -
+// "the traced program's exact output token" - stays named and greppable.
 func codeExactAnswer(want string) eval.Evaluator {
-	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
-		got := strings.TrimSpace(response)
-		got = strings.Trim(got, "\"'`")
-		got = strings.TrimSuffix(strings.TrimSpace(got), ".")
-		got = strings.TrimSpace(got)
-		wantTrimmed := strings.TrimSpace(want)
-		if strings.EqualFold(got, wantTrimmed) {
-			return eval.Score{Value: 1, Detail: fmt.Sprintf("equals %q", wantTrimmed)}
-		}
-		return eval.Score{Value: 0, Detail: fmt.Sprintf("got %q, want %q", got, wantTrimmed)}
-	})
+	return eval.ExactToken(want)
 }
 
 // codeTracePythonSource is the inline Python function traced by

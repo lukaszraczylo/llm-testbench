@@ -15,6 +15,10 @@ func TestWebSitemapMaxURLsTest_Eval(t *testing.T) {
 	}{
 		{"correct", "50000", 1},
 		{"prose wrapped", "The limit is 50000 URLs per sitemap file.", 1},
+		// B1: the prompt itself primes comma grouping with "52,000", so a
+		// comma-grouped correct answer must not score 0.
+		{"comma-grouped", "50,000", 1},
+		{"comma-grouped in a sentence", "The limit is 50,000 URLs.", 1},
 		{"wrong: confused with the uncompressed size limit in MB", "50", 0},
 		{"wrong entirely", "10000", 0},
 	}
@@ -61,8 +65,14 @@ func TestWebDNSMXRecordTest_Eval(t *testing.T) {
 		{"bare", "MX", 1},
 		{"lowercase", "mx", 1},
 		{"with the word record", "MX record", 1},
+		{"with the word records and a period", "MX records.", 1},
+		{"quoted", `"MX"`, 1},
 		{"wrong: CNAME", "CNAME", 0},
 		{"wrong: A record", "A", 0},
+		// B4: restating the prompt's example list (which no longer
+		// includes MX at all) must not score 1 the way the old
+		// substring-anywhere-in-the-response evaluator would have.
+		{"restating the full example list scores 0", "A, AAAA, CNAME, TXT, NS", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -86,6 +96,9 @@ func TestWebCanonicalVsRedirectTest_Eval(t *testing.T) {
 		{"correct capitalized with period", "Canonical.", 1},
 		{"wrong: redirect", "redirect", 0},
 		{"wrong: extra words break the forced one-word format", "Use a canonical tag", 0},
+		// B3: the prompt's own phrasing quotes both options.
+		{"correct, quoted (prompt's own phrasing)", `"canonical"`, 1},
+		{"correct, bolded", "**canonical**", 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

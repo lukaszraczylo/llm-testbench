@@ -111,12 +111,24 @@ func jsonValueAs[T comparable](v any) (T, error) {
 	}
 }
 
+// asFloat64 coerces a decoded JSON value to float64. A string is accepted
+// too (B9), coerced only when it parses cleanly as a number end to end
+// (strconv.ParseFloat on the trimmed string): a model that answers
+// {"line":"8"} instead of {"line":8} - both are the same value, and the
+// prompt asked for a JSON field, not a JSON type - must not score 0 for a
+// mechanical typing difference. A non-numeric string ("eight") still fails.
 func asFloat64(v any) (float64, error) {
 	switch n := v.(type) {
 	case float64:
 		return n, nil
 	case json.Number:
 		return n.Float64()
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		if err != nil {
+			return 0, fmt.Errorf("expected number, got non-numeric string %q", n)
+		}
+		return f, nil
 	default:
 		return 0, fmt.Errorf("expected number, got %T (%v)", v, v)
 	}

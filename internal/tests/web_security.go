@@ -19,20 +19,24 @@ HTTP/1.1 204 No Content
 Access-Control-Allow-Origin: https://app.example.com
 Access-Control-Allow-Methods: GET, POST, PUT`
 
-// webCORSMissingHeaderPattern requires the literal token
-// "Access-Control-Allow-Headers" (case-insensitive) anywhere in the
-// response, accepting it with or without a trailing colon or surrounding
-// prose.
-const webCORSMissingHeaderPattern = `(?i)access-control-allow-headers`
-
-// webCORSMissingHeaderTest: identify the single missing CORS response
-// header that will cause the browser to block the request.
+// webCORSMissingHeaderWant is the single header name this test's prompt
+// forces as the answer.
 //
 // ground truth: the browser sent Access-Control-Request-Headers:
 // X-Custom-Auth in the preflight, but the server's response never echoes
 // that header name back in an Access-Control-Allow-Headers response
 // header, so the browser blocks the actual PUT request even though the
-// origin and method are both explicitly allowed.
+// origin and method are both explicitly allowed. B5: scored with
+// eval.ExactToken, anchored to the whole answer, rather than a substring
+// match anywhere in the response - a substring match would also score a
+// response that talks about the header without ever naming it as the
+// answer (e.g. explaining Access-Control-Allow-Methods at length while
+// mentioning "Access-Control-Allow-Headers" only as one of several names
+// it considered and rejected).
+const webCORSMissingHeaderWant = "Access-Control-Allow-Headers"
+
+// webCORSMissingHeaderTest: identify the single missing CORS response
+// header that will cause the browser to block the request.
 func webCORSMissingHeaderTest() testkit.Test {
 	prompt := `Here is a CORS preflight exchange:
 
@@ -49,7 +53,7 @@ nothing else.`
 		Subcategory: "web",
 		Description: "Identify the single missing CORS response header that causes a browser to block a preflighted request.",
 		Prompt:      prompt,
-		Eval:        eval.Regex(webCORSMissingHeaderPattern),
+		Eval:        eval.ExactToken(webCORSMissingHeaderWant),
 	}
 }
 

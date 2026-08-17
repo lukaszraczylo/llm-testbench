@@ -117,7 +117,8 @@ Respond with only a JSON object: {"quorum_size":<number>,"max_tolerable_failures
 // description of a worst-case (minimum-fanout) B-tree capacity model
 // written for this test, pinning order m and a target key count.
 const paperBTreeExcerpt = `A B-tree of order m allows every internal node between ceil(m/2) and m
-children, keeping the tree shallow and well balanced even as it grows,
+children, except the root, which may have as few as two children, keeping
+the tree shallow and well balanced even as it grows,
 which bounds the number of disk reads a lookup needs to at most one per
 level. For capacity planning this report models the worst case: a tree
 where every internal node has the minimum allowed fanout, f equals
@@ -177,12 +178,19 @@ partition between two data centers, both sides keep accepting writes
 independently rather than refusing requests, accepting that the two sides
 may briefly disagree and need reconciliation once the partition heals.`
 
-// paperCAPAvailabilityPattern anchors on the trimmed response being
-// exactly the single word "availability" (case-insensitive, with an
-// optional trailing period), accepting every materially-correct form of
-// the forced one-word answer without also matching a response that names
-// the wrong guarantee.
-const paperCAPAvailabilityPattern = `(?i)^\s*availability\.?\s*$`
+// paperCAPAvailabilityWant is the single word this test's prompt forces as
+// the answer.
+//
+// ground truth: the excerpt states both data centers "keep accepting
+// writes independently rather than refusing requests" during the
+// partition. Per the CAP theorem as the excerpt defines it, continuing to
+// answer every request rather than refusing (erroring) is the definition
+// of availability, so the system prioritizes availability over
+// consistency during the partition. B2: scored with eval.ExactToken so a
+// quoted or bolded "Availability" - both forms the prompt's own phrasing
+// invites - still matches; the prior anchored regex required the bare
+// word and scored those correct answers 0.
+const paperCAPAvailabilityWant = "Availability"
 
 // paperCAPAvailabilityChoiceTest: identify, from an inline CAP-theorem
 // excerpt and a described design decision, which guarantee (consistency or
@@ -204,7 +212,7 @@ the CAP theorem? Respond with only one word: "Consistency" or
 		Subcategory: "whitepapers",
 		Description: "Identify which CAP-theorem guarantee a described partition-handling design decision prioritizes.",
 		Prompt:      prompt,
-		Eval:        eval.Regex(paperCAPAvailabilityPattern),
+		Eval:        eval.ExactToken(paperCAPAvailabilityWant),
 	}
 }
 

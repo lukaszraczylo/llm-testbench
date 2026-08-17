@@ -1,6 +1,10 @@
 package tests
 
 import (
+	"context"
+	"regexp"
+	"strings"
+
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
@@ -95,7 +99,12 @@ file belongs in for a per-machine (not per-user) job.`
 // single-quoted or double-quoted extension argument, invoking a foo->bar
 // substitution on file.txt, on a single line (no DOTALL) so a scattered,
 // multi-paragraph mention of the same tokens does not count as a real
-// one-line command.
+// one-line command. The substitution's delimiter is accepted as any of the
+// common sed delimiter characters (/, |, comma, #, colon, semicolon, @),
+// not just "/" - "s/foo/bar/" is the conventional example, but any
+// consistently-used delimiter is equally correct BSD sed syntax (AN3). Go's
+// RE2 engine has no backreferences, so each delimiter choice is spelled out
+// as its own alternative rather than captured-and-reused.
 //
 // ground truth: BSD sed's -i flag takes a mandatory in-place-suffix
 // argument (used for backup files); passing an empty single-quoted or
@@ -104,7 +113,7 @@ file belongs in for a per-machine (not per-user) job.`
 // "sed -i 's/foo/bar/' file.txt" (no argument to -i) works on Linux but
 // errors on macOS, where it is parsed as "-i 's/foo/bar/'" (using the sed
 // script itself as the backup suffix) followed by a missing script operand.
-const macosSedPattern = `(?i)\bsed\b[^\n]*-i\s*(''|"")[^\n]*s/foo/bar/g?[^\n]*file\.txt`
+const macosSedPattern = `(?i)\bsed\b[^\n]*-i\s*(''|"")[^\n]*(?:s/foo/bar/|s\|foo\|bar\||s,foo,bar,|s#foo#bar#|s:foo:bar:|s;foo;bar;|s@foo@bar@)g?[^\n]*file\.txt`
 
 // macosSedInplaceTest: give the portable BSD sed one-liner for in-place
 // substitution with no backup file, contrasted with the GNU-only form that
@@ -158,7 +167,7 @@ explicit domain targeting).`
 	evaluator := eval.Mean(
 		eval.ContainsAny("bootstrap"),
 		eval.ContainsAny("bootstrap system", "system domain", "domain system", "target system", "system target"),
-		eval.ContainsAny("deprecated", "avoid launchctl load", "no longer recommended", "outdated"),
+		eval.ContainsAny("deprecated", "avoid launchctl load", "no longer recommended", "outdated", "legacy", "superseded", "obsolete", "replaced"),
 	)
 
 	return testkit.Test{
@@ -171,9 +180,39 @@ explicit domain targeting).`
 	}
 }
 
-// macosPlutilPattern requires the built-in plutil -p pretty-printer
-// invoked directly on the plist path, on one line.
-const macosPlutilPattern = `(?i)\bplutil\b[^\n]*-p[^\n]*/Library/Preferences/com\.example\.app\.plist`
+// macosPlutilFlagPattern requires a properly bounded "-p" flag token
+// (immediately preceded by whitespace or the start of the response, and
+// immediately followed by whitespace or the end of the response). An
+// unbounded substring search for "-p" also matches inside the word
+// "pretty-print" (its internal hyphen followed by "p"), which would let a
+// response that only talks *about* pretty-printing - without actually
+// invoking "plutil -p" - score a false positive (A2).
+var macosPlutilFlagPattern = regexp.MustCompile(`(?i)(?:^|\s)-p(?:\s|$)`)
+
+// macosPlutilPlistReadEval accepts three materially correct ways to read a
+// plist file's contents in human-readable form using only macOS-bundled
+// tools: "plutil -p <path>" (with -p bounded as an actual flag token, not
+// matched as a substring of "pretty-print"), "plutil -convert xml1 -o -
+// <path>" (convert to XML and write to stdout instead of editing in
+// place), and "defaults read <domain-or-path>" (A2).
+func macosPlutilPlistReadEval() eval.Evaluator {
+	return eval.EvaluatorFunc(func(_ context.Context, response string) eval.Score {
+		if !strings.Contains(response, "com.example.app") {
+			return eval.Score{Value: 0, Detail: "does not name the target plist/domain"}
+		}
+		lower := strings.ToLower(response)
+		switch {
+		case strings.Contains(lower, "plutil") && macosPlutilFlagPattern.MatchString(response):
+			return eval.Score{Value: 1, Detail: "plutil -p (a properly bounded flag token)"}
+		case strings.Contains(lower, "plutil") && strings.Contains(lower, "-convert") && strings.Contains(lower, "xml1"):
+			return eval.Score{Value: 1, Detail: "plutil -convert xml1"}
+		case strings.Contains(lower, "defaults read"):
+			return eval.Score{Value: 1, Detail: "defaults read"}
+		default:
+			return eval.Score{Value: 0, Detail: "no recognized plist-reading command"}
+		}
+	})
+}
 
 // macosPlutilPlistReadTest: pretty-print a plist file's contents using a
 // tool that ships with macOS (no Homebrew installs).
@@ -190,15 +229,37 @@ that prints the plist's contents to your terminal in a readable
 	// ground truth: plutil ships with macOS and its -p flag pretty-prints a
 	// plist (binary or XML) to stdout in a human-readable form, taking the
 	// file path directly - no domain-name lookup or Homebrew install
-	// needed, unlike "defaults read <domain>".
+	// needed, unlike "defaults read <domain>". "plutil -convert xml1 -o -"
+	// (convert to XML, write to stdout) and "defaults read" are also
+	// accepted as materially correct alternatives (A2).
 	return testkit.Test{
 		ID:          "macos-plutil-plist-read",
 		Category:    "operations",
 		Subcategory: "macos",
 		Description: "Pretty-print a plist file's contents using the built-in plutil -p command.",
 		Prompt:      prompt,
-		Eval:        eval.Regex(macosPlutilPattern),
+		Eval:        macosPlutilPlistReadEval(),
 	}
+}
+
+// macosMdfindSpotlightEval gates the whole score on mdfind actually being
+// used: the prompt itself supplies both a plausible flag ("-name" is a real
+// "find" flag too) and the search term ("invoice"), so a bare filesystem
+// walk with "find" that happens to echo those prompt-supplied tokens must
+// not be able to reach a passing score. Only once mdfind is confirmed
+// present does the response get scored on the remaining, more permissive
+// criteria (A13).
+func macosMdfindSpotlightEval() eval.Evaluator {
+	sub := eval.Mean(
+		eval.ContainsAny("-onlyin", "-name"),
+		eval.ContainsAny("invoice"),
+	)
+	return eval.EvaluatorFunc(func(ctx context.Context, response string) eval.Score {
+		if !strings.Contains(strings.ToLower(response), "mdfind") {
+			return eval.Score{Value: 0, Detail: "mdfind not used; a filesystem walk is not what was asked for"}
+		}
+		return sub.Evaluate(ctx, response)
+	})
 }
 
 // macosMdfindSpotlightTest: use mdfind (Spotlight's metadata index) instead
@@ -211,20 +272,16 @@ whose name contains "invoice", scoped only to your home directory (~).`
 	// ground truth: mdfind queries the already-built Spotlight index rather
 	// than walking the filesystem; -onlyin scopes the search to a
 	// directory, and either -name or a plain query string matches on file
-	// name.
-	evaluator := eval.Mean(
-		eval.ContainsAll("mdfind"),
-		eval.ContainsAny("-onlyin", "-name"),
-		eval.ContainsAny("invoice"),
-	)
-
+	// name. mdfind's presence is a hard gate (A13): "-name" is also a real
+	// "find" flag, and "invoice" is echoed straight from the prompt, so
+	// neither can carry the score for a wrong, find-based answer.
 	return testkit.Test{
 		ID:          "macos-mdfind-spotlight",
 		Category:    "operations",
 		Subcategory: "macos",
 		Description: "Use mdfind against Spotlight's index, scoped to a directory, instead of a full filesystem walk.",
 		Prompt:      prompt,
-		Eval:        evaluator,
+		Eval:        macosMdfindSpotlightEval(),
 	}
 }
 
@@ -238,11 +295,14 @@ the command to create a local snapshot now, and the separate command to
 list the local snapshots that currently exist.`
 
 	// ground truth: tmutil manages local APFS snapshots independently of
-	// having a Time Machine backup destination attached. "tmutil snapshot"
-	// creates one immediately; "tmutil listlocalsnapshots /" lists the
-	// local snapshots that exist for the root volume.
+	// having a Time Machine backup destination attached. "tmutil
+	// localsnapshot" is the current, documented verb that creates one
+	// immediately ("tmutil snapshot" does not appear in tmutil's own usage
+	// listing on current macOS and is accepted only as a legacy/undocumented
+	// alias - verified on this machine, A1); "tmutil listlocalsnapshots /"
+	// lists the local snapshots that exist for the root volume.
 	evaluator := eval.Mean(
-		eval.ContainsAny("tmutil snapshot"),
+		eval.ContainsAny("tmutil localsnapshot", "tmutil snapshot"),
 		eval.ContainsAny("tmutil listlocalsnapshots", "listlocalsnapshots"),
 	)
 
@@ -300,11 +360,13 @@ tool built into macOS, that does this.`
 	// ground truth: caffeinate, bundled with macOS, takes a power-management
 	// assertion for as long as a given utility runs when you pass that
 	// utility as its argument, and releases the assertion automatically
-	// when the utility exits - no manual cleanup needed.
-	evaluator := eval.Mean(
-		eval.ContainsAll("caffeinate"),
-		eval.ContainsAny("migrate.sh"),
-	)
+	// when the utility exits - no manual cleanup needed. migrate.sh must be
+	// caffeinate's own argument on the same command line (e.g.
+	// "caffeinate ./migrate.sh"), not merely mentioned somewhere in the
+	// response: a backgrounded "caffeinate & ./migrate.sh" variant runs the
+	// two independently, so caffeinate's assertion does not track the
+	// script's lifetime and would not auto-release when it exits (A11).
+	evaluator := eval.Regex(`(?i)\bcaffeinate\b[^\n&;|]*\.?/?migrate\.sh`)
 
 	return testkit.Test{
 		ID:          "macos-caffeinate",
@@ -317,8 +379,11 @@ tool built into macOS, that does this.`
 }
 
 // macosStatPattern requires the BSD stat -f format-string form printing
-// only the byte size (%z) of file.txt.
-const macosStatPattern = `(?i)\bstat\b[^\n]*-f\s*"?%z"?[^\n]*file\.txt`
+// only the byte size (%z) of file.txt. The %z format specifier is accepted
+// bare or wrapped in either single or double quotes (both are valid shell
+// quoting for a format string with no special characters in it) - not just
+// double quotes (A4).
+const macosStatPattern = `(?i)\bstat\b[^\n]*-f\s*['"]?%z['"]?[^\n]*file\.txt`
 
 // macosStatBSDGNUTest: give the BSD stat command (macOS's built-in stat)
 // for a file's size in bytes, and name the differing GNU stat flag.

@@ -92,6 +92,9 @@ func TestMacosSedInplaceTest_Eval(t *testing.T) {
 		{"global replace flag still matches", `sed -i '' 's/foo/bar/g' file.txt`, 1},
 		{"GNU-style with no extension argument is wrong on macOS", `sed -i 's/foo/bar/' file.txt`, 0},
 		{"backup extension creates a file, contradicting the requirement", `sed -i.bak 's/foo/bar/' file.txt`, 0},
+		{"pipe delimiter is equally valid sed syntax (AN3)", `sed -i '' 's|foo|bar|' file.txt`, 1},
+		{"comma delimiter (AN3)", `sed -i '' 's,foo,bar,g' file.txt`, 1},
+		{"hash delimiter (AN3)", `sed -i "" 's#foo#bar#' file.txt`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -128,6 +131,10 @@ Apple deprecated for lacking an explicit domain target.`
 		{"good answer, alternate phrasing", goodPhrasing, 1},
 		{"wrong subcommand (deprecated load only) scores 0", badWrongSubcommand, 0},
 		{"missing domain target and deprecation note loses two thirds", badMissingDomain, 1.0 / 3.0},
+		{"'legacy' deprecation cue (A14)", `Use launchctl bootstrap system /Library/LaunchDaemons/com.example.myjob.plist; launchctl load is the legacy subcommand.`, 1},
+		{"'superseded' deprecation cue (A14)", `launchctl bootstrap, system domain target, superseded launchctl load.`, 1},
+		{"'obsolete' deprecation cue (A14)", `bootstrap system domain target; launchctl load is obsolete.`, 1},
+		{"'replaced' deprecation cue (A14)", `launchctl bootstrap system domain target replaced launchctl load.`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -152,6 +159,9 @@ func TestMacosPlutilPlistReadTest_Eval(t *testing.T) {
 		{"quoted path", `plutil -p "/Library/Preferences/com.example.app.plist"`, 1},
 		{"wrong tool entirely (cat prints binary garbage)", `cat /Library/Preferences/com.example.app.plist`, 0},
 		{"plutil without -p just validates, does not print", `plutil /Library/Preferences/com.example.app.plist`, 0},
+		{"plutil -convert xml1 to stdout is a materially correct alternative (A2)", `plutil -convert xml1 -o - /Library/Preferences/com.example.app.plist`, 1},
+		{"defaults read is a materially correct alternative (A2)", `defaults read com.example.app`, 1},
+		{"mentions pretty-print in prose without invoking -p as a bounded flag (A2 bug probe)", `plutil can pretty-print the plist at /Library/Preferences/com.example.app.plist, though I don't recall the exact flag.`, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -174,8 +184,9 @@ func TestMacosMdfindSpotlightTest_Eval(t *testing.T) {
 		{"onlyin with query", `mdfind -onlyin ~ "invoice"`, 1},
 		{"name flag", `mdfind -onlyin ~ -name invoice`, 1},
 		{"prose wrapped", `Run mdfind -onlyin ~ invoice to search the Spotlight index.`, 1},
-		{"uses find instead of mdfind, walks the filesystem", `find ~ -iname "*invoice*"`, 1.0 / 3.0},
-		{"mdfind used but searching for the wrong term entirely", `mdfind -onlyin ~ "receipt"`, 2.0 / 3.0},
+		{"uses find instead of mdfind, walks the filesystem, gated to 0 (A13)", `find ~ -iname "*invoice*"`, 0},
+		{"mdfind used but searching for the wrong term entirely", `mdfind -onlyin ~ "receipt"`, 0.5},
+		{"find command echoing both prompt-supplied tokens must not pass the gate (A13 bug probe)", `find ~ -name "*invoice*"`, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -200,6 +211,8 @@ func TestMacosAPFSSnapshotTest_Eval(t *testing.T) {
 		{"listlocalsnapshots without explicit tmutil prefix restated", "First tmutil snapshot, then check with listlocalsnapshots /.", 1},
 		{"only creates, never lists", "Just run tmutil snapshot.", 0.5},
 		{"wrong tool (diskutil) mentioned instead of tmutil", "Use diskutil apfs snapshot / to create one.", 0},
+		{"current documented localsnapshot verb (A1)", "Create: tmutil localsnapshot\nList: tmutil listlocalsnapshots /", 1},
+		{"localsnapshot only, never lists (A1)", "Just run tmutil localsnapshot.", 0.5},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -266,8 +279,9 @@ func TestMacosCaffeinateTest_Eval(t *testing.T) {
 		{"bare invocation", `caffeinate ./migrate.sh`, 1},
 		{"with system-sleep flag", `caffeinate -s ./migrate.sh`, 1},
 		{"prose wrapped", "Run `caffeinate -i ./migrate.sh` and it stops holding the assertion once migrate.sh exits.", 1},
-		{"wrong script named, not the target", `caffeinate ./other-script.sh`, 0.5},
+		{"wrong script named, not the target, scores 0 now that migrate.sh must be on the same line (A11)", `caffeinate ./other-script.sh`, 0},
 		{"unrelated tool, does not auto-release on exit", `Just run pmset noidle before starting your script.`, 0},
+		{"backgrounded caffeinate is a broken answer and must not pass (A11 bug probe)", `caffeinate & ./migrate.sh`, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -292,6 +306,7 @@ func TestMacosStatBSDGNUTest_Eval(t *testing.T) {
 		{"prose wrapped", "Run stat -f%z file.txt on macOS; the GNU equivalent flag is -c.", 1},
 		{"correct BSD command but never names the GNU flag", `stat -f%z file.txt`, 0.5},
 		{"GNU -c%s syntax used on macOS scores half: -c token matches but -f BSD form is missing", `stat -c%s file.txt`, 0.5},
+		{"single-quoted format string (A4)", `stat -f '%z' file.txt, and on Linux GNU stat uses -c.`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

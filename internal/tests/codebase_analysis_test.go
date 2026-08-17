@@ -14,6 +14,10 @@ func TestCodeBugLineDiffTest_Eval(t *testing.T) {
 		want     float64
 	}{
 		{"correct: root-cause line", `{"line":8}`, 1},
+		// B9: a numeric-string JSON value must coerce the same as a
+		// native number - the prompt asked for the right line, not a
+		// specific JSON type.
+		{"correct as a numeric string", `{"line":"8"}`, 1},
 		{"wrong: points at the panic site instead of the root cause", `{"line":10}`, 0},
 		{"wrong line entirely", `{"line":6}`, 0},
 	}
@@ -87,8 +91,14 @@ func TestCodeBigODedupTest_Eval(t *testing.T) {
 		{"unicode superscript form", "O(n²)", 1},
 		{"n*n form", "O(n*n)", 1},
 		{"lowercase o", "o(n^2)", 1},
+		{"quoted", `"O(n^2)"`, 1},
+		{"trailing period", "O(n^2).", 1},
 		{"wrong: linear", "O(n)", 0},
 		{"wrong: linearithmic", "O(n log n)", 0},
+		// B5: the correct notation appears as a substring of a negated
+		// sentence; the whole-response-anchored evaluator must not match
+		// on that substring.
+		{"negated: contains the substring O(n^2) but names O(n) as the answer", "not O(n^2), it's O(n) with a hash set", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

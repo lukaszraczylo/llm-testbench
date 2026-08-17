@@ -234,7 +234,9 @@ printed, nothing else.`
 		Subcategory: "python",
 		Description: "Trace the classic mutable-default-argument bug across three calls sharing one list.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("[1, 2, 3]"),
+		// A7: eval.ExactToken so a fenced or quoted rendering of the exact
+		// printed text still scores full credit.
+		Eval: eval.ExactToken("[1, 2, 3]"),
 	}
 }
 
@@ -270,7 +272,9 @@ printed, nothing else.`
 		Subcategory: "python",
 		Description: "Trace the exact output of a length-filtered dict comprehension whose items are sorted and printed.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("[('apple', 5), ('banana', 6), ('cherry', 6), ('date', 4)]"),
+		// A7: eval.ExactToken so a fenced or quoted rendering of the exact
+		// printed text still scores full credit.
+		Eval: eval.ExactToken("[('apple', 5), ('banana', 6), ('cherry', 6), ('date', 4)]"),
 	}
 }
 
@@ -313,7 +317,9 @@ printed, nothing else.`
 		Subcategory: "python",
 		Description: "Trace the exact output of iterating a generator a second time after it is already exhausted.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("[0, 1, 2] []"),
+		// A7: eval.ExactToken so a fenced or quoted rendering of the exact
+		// printed text still scores full credit.
+		Eval: eval.ExactToken("[0, 1, 2] []"),
 	}
 }
 
@@ -345,9 +351,15 @@ keeping the same behavior: recursively find every ".yaml" file under
 base_dir and return their full paths. Respond with only the rewritten
 function.`
 
+	// A16: Path.rglob("*.yaml") and Path.glob("**/*.yaml") are behaviorally
+	// equivalent recursive searches ("**/" is glob's own recursive
+	// wildcard), so the recursive-method check accepts either instead of
+	// only the literal substring "rglob"; the "*.yaml" pattern is checked
+	// separately from which method carries it.
 	evaluator := eval.All(
 		eval.W(eval.ContainsAny("from pathlib import Path", "import pathlib"), 1),
-		eval.W(eval.ContainsAll("rglob", "*.yaml"), 2),
+		eval.W(eval.ContainsAny("rglob", `glob("**/`, "glob('**/"), 1),
+		eval.W(eval.ContainsAll("*.yaml"), 1),
 	)
 
 	return testkit.Test{

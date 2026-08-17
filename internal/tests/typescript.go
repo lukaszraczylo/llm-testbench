@@ -142,9 +142,19 @@ given an interface with a nested object property, that nested object's own
 properties are also optional). Do not use the "any" type anywhere. Respond
 with only the type definition.`
 
+	// A9: the mapped-type variable name is the author's choice, not
+	// mandated syntax - "K" is one common convention but "P" (as used in
+	// TypeScript's own built-in Partial<T>) is equally correct, so the
+	// recursive-reference check accepts any identifier there rather than
+	// only the literal "DeepPartial<T[K]>" substring. The "keyof T" check
+	// is similarly relaxed to tolerate any whitespace width between the two
+	// words, not just a single space.
 	evaluator := eval.All(
-		eval.W(eval.ContainsAll("DeepPartial<T>", "keyof T"), 2),
-		eval.W(eval.ContainsAny("DeepPartial<T[K]>"), 1),
+		eval.W(eval.Mean(
+			eval.ContainsAll("DeepPartial<T>"),
+			eval.Regex(`(?i)keyof\s+T\b`),
+		), 2),
+		eval.W(eval.Regex(`DeepPartial<\s*T\[\s*\w+\s*\]\s*>`), 1),
 		eval.W(noAnyEscapeHatch(), 1),
 	)
 
@@ -316,8 +326,13 @@ configuration as an eslint.config.js flat config, preserving the same rules
 (semi: error, prefer-const: error) and the ecmaVersion/sourceType settings
 via languageOptions. Respond with only the eslint.config.js file content.`
 
+	// A flat eslint.config.js can equally validly be authored as an ES
+	// module (export default [...]) or as CommonJS (module.exports = [...]),
+	// depending on the project's own module system; requiring "export
+	// default" specifically rejected an otherwise-correct CommonJS answer
+	// (A8).
 	evaluator := eval.All(
-		eval.W(eval.ContainsAll("export default"), 2),
+		eval.W(eval.ContainsAny("export default", "module.exports"), 2),
 		eval.W(eval.ContainsAny("defineConfig(", "languageOptions"), 1),
 	)
 
@@ -447,6 +462,8 @@ printed, nothing else.`
 		Subcategory: "typescript",
 		Description: "Trace the exact output of optional chaining combined with nullish coalescing on a falsy-but-present value.",
 		Prompt:      prompt,
-		Eval:        eval.Equals("localhost:0"),
+		// A7: eval.ExactToken so a fenced or quoted rendering of the exact
+		// printed text still scores full credit.
+		Eval: eval.ExactToken("localhost:0"),
 	}
 }

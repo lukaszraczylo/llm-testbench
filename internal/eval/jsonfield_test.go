@@ -90,6 +90,43 @@ func TestJSONField_Int(t *testing.T) {
 	}
 }
 
+// TestJSONField_Int_NumericStringCoercion is the B9 regression: a model
+// answering {"line":"8"} instead of {"line":8} must still score 1 - the
+// prompt asked for a JSON field with the right value, not a specific JSON
+// type.
+func TestJSONField_Int_NumericStringCoercion(t *testing.T) {
+	e := JSONField("line", 8)
+	tests := []struct {
+		name     string
+		response string
+		want     float64
+	}{
+		{"numeric string coerces", `{"line":"8"}`, 1},
+		{"numeric string with whitespace coerces", `{"line":" 8 "}`, 1},
+		{"wrong numeric string", `{"line":"9"}`, 0},
+		{"non-numeric string does not coerce", `{"line":"eight"}`, 0},
+		{"native number still works", `{"line":8}`, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := e.Evaluate(context.Background(), tt.response)
+			if got.Value != tt.want {
+				t.Errorf("Evaluate(%q) = %v, want %v (detail: %s)", tt.response, got.Value, tt.want, got.Detail)
+			}
+		})
+	}
+}
+
+// TestJSONField_Float_NumericStringCoercion mirrors the int case for a
+// float64-typed field.
+func TestJSONField_Float_NumericStringCoercion(t *testing.T) {
+	e := JSONField("port", float64(8080))
+	got := e.Evaluate(context.Background(), `{"port":"8080"}`)
+	if got.Value != 1 {
+		t.Errorf("Evaluate() = %v, want 1 (detail: %s)", got.Value, got.Detail)
+	}
+}
+
 func TestJSONField_NestedPath(t *testing.T) {
 	e := JSONField("task1", "search_web")
 	got := e.Evaluate(context.Background(), `{"task1":"search_web","task2":"read_file"}`)

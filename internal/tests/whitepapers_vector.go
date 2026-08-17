@@ -114,8 +114,8 @@ total number of documents in the corpus and df(t) is the number of
 documents that contain t at least once. The TF-IDF weight of a term in a
 document is the product tf(t,d) times idf(t): a term that appears often in
 one document but rarely elsewhere scores highest, while a term appearing in
-every document scores near zero regardless of how often it repeats, since
-its idf approaches the logarithm of one.`
+every document scores zero regardless of how often it repeats, since its
+idf is ln(1) = 0 exactly.`
 
 // paperTFIDFDoc1, paperTFIDFDoc2, and paperTFIDFDoc3 are the pre-tokenized
 // (whitespace-split, lowercase) mini-corpus for paperTFIDFTermScoreTest.
@@ -185,6 +185,12 @@ surfaced, never recover ones it dropped.`
 // paperRecallRelevant and paperRecallRetrievedTop6 are the inline
 // relevant-set and top-6 retrieved-ranking fixtures for
 // paperRecallAtKTest.
+//
+// ground truth: relevant = {D2,D5,D7,D9} (size 4); of those, D2, D5, and
+// D7 appear somewhere in the top-6 retrieved list, but D9 does not, so the
+// intersection has size 3. recall@6 = |intersection| / |relevant| = 3/4 =
+// 0.75. whitepapers_vector_test.go independently recomputes this by
+// counting the intersection directly, not via wpRecallAtK.
 var (
 	paperRecallRelevant      = []string{"D2", "D5", "D7", "D9"}
 	paperRecallRetrievedTop6 = []string{"D1", "D5", "D3", "D7", "D6", "D2"}
