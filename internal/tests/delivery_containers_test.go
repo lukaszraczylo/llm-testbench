@@ -387,6 +387,15 @@ func TestDelDockerLayerCountWant_GroundTruth(t *testing.T) {
 		t.Fatalf("write app: %v", err)
 	}
 
+	// BuildKit keeps base layers in its own cache, so alpine:3.20 is not
+	// guaranteed to be in the local image store even after a successful
+	// build below. Pull it explicitly, and treat a pull failure (offline
+	// host, registry rate limit) as an environment limitation rather than
+	// a ground-truth failure.
+	if out, err := exec.Command("docker", "pull", "alpine:3.20").CombinedOutput(); err != nil {
+		t.Skipf("docker pull alpine:3.20 unavailable: %v\n%s", err, out)
+	}
+
 	const tag = "llmtestbench-layercount-groundtruth:test"
 	// #nosec G204 -- tag is a fixed literal and dir is a t.TempDir() path,
 	// never external/user-controlled input.
