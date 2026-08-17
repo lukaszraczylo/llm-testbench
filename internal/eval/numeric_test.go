@@ -26,6 +26,9 @@ func TestExtractLastNumber(t *testing.T) {
 		{"platform qualifier with parenthetical acronym", "24 bytes on a 64-bit (LP64) platform.", 24, false},
 		{"digits glued into an identifier via underscore", "sizeof = 24 bytes on x86_64", 24, false},
 		{"digits glued into an identifier via hyphen (bogus sign)", "sizeof = 24 bytes on x86-64", 24, false},
+		{"multiplier suffix accepted", "The compression ratio is 64x.", 64, false},
+		{"multiplier suffix at end of text", "speedup: 8x", 8, false},
+		{"hex literal never a multiplier", "the flag is 0x2A so the answer is 42", 42, false},
 		{"hyphen-compound number accepted as a last resort", "It is a 24-byte struct.", 24, false},
 		// Documented limitation, not a regression: the heuristic has no
 		// notion of "the total" vs. "a breakdown component" and returns

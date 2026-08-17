@@ -74,7 +74,14 @@ func classifyMatch(text string, start, end int) (numberCandidate, bool) {
 		return numberCandidate{}, false // e.g. the "64" in "LP64"
 	}
 	if end < len(text) && isWordByte(text[end]) {
-		return numberCandidate{}, false // e.g. "24bytes" with no separator
+		// Permit a multiplier suffix ("64x" = 64 times): a single trailing
+		// x/X with nothing word-like after it. Hex ("0x2A") and identifiers
+		// ("float64x2") keep a word byte after the x and stay rejected.
+		isMultiplier := (text[end] == 'x' || text[end] == 'X') &&
+			(end+1 >= len(text) || !isWordByte(text[end+1]))
+		if !isMultiplier {
+			return numberCandidate{}, false // e.g. "24bytes" with no separator
+		}
 	}
 
 	compound := start > 0 && text[start-1] == '-' && start-2 >= 0 && isWordByte(text[start-2])
