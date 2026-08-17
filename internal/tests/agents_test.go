@@ -1,84 +1,44 @@
 package tests
 
 import (
-	"context"
 	"testing"
+
+	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
 
-func TestAgentToolRoutingTest_Eval(t *testing.T) {
-	tc := agentToolRoutingTest()
+// TestRegisterAgentsTests_Wiring checks registerAgentsTests wires up all
+// three agents subcategories - tool-routing, planning, delegation - with
+// 10 tests each, all categorized "agents", and no duplicate IDs across the
+// three sibling files (testkit.Registry.Register panics on a duplicate ID,
+// which would fail this test outright).
+func TestRegisterAgentsTests_Wiring(t *testing.T) {
+	r := testkit.NewRegistry()
+	registerAgentsTests(r)
 
-	tests := []struct {
-		name     string
-		response string
-		want     float64
-	}{
-		{
-			name:     "all correct",
-			response: `{"task1":"none","task2":"query_db","task3":"search_web","task4":"send_email"}`,
-			want:     1,
-		},
-		{
-			name:     "one wrong",
-			response: `{"task1":"run_shell","task2":"query_db","task3":"search_web","task4":"send_email"}`,
-			want:     0.75,
-		},
-		{
-			name:     "all wrong",
-			response: `{"task1":"run_shell","task2":"search_web","task3":"query_db","task4":"none"}`,
-			want:     0,
-		},
+	const wantTotal = 30
+	if r.Len() != wantTotal {
+		t.Fatalf("registerAgentsTests: registry has %d tests, want %d", r.Len(), wantTotal)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tc.Eval.Evaluate(context.Background(), tt.response)
-			if got.Value != tt.want {
-				t.Errorf("Eval.Evaluate(%q) = %v, want %v (detail: %s)", tt.response, got.Value, tt.want, got.Detail)
-			}
-		})
-	}
-}
 
-func TestAgentPlanOrderingTest_Eval(t *testing.T) {
-	tc := agentPlanOrderingTest()
-
-	tests := []struct {
-		name     string
-		response string
-		want     float64
-	}{
-		{
-			name:     "correct order",
-			response: `["build","test","backup","deploy","verify","rollback"]`,
-			want:     1,
-		},
-		{
-			name:     "correct order fenced",
-			response: "```json\n[\"build\",\"test\",\"backup\",\"deploy\",\"verify\",\"rollback\"]\n```",
-			want:     1,
-		},
-		{
-			name:     "backup before test violates dependency",
-			response: `["build","backup","test","deploy","verify","rollback"]`,
-			want:     0,
-		},
-		{
-			name:     "rollback before verify",
-			response: `["build","test","backup","deploy","rollback","verify"]`,
-			want:     0,
-		},
-		{
-			name:     "missing a step",
-			response: `["build","test","backup","deploy","verify"]`,
-			want:     0,
-		},
+	counts := map[string]int{}
+	for _, tc := range r.All() {
+		if tc.Category != "agents" {
+			t.Errorf("test %q: Category = %q, want %q", tc.ID, tc.Category, "agents")
+		}
+		if tc.Prompt == "" {
+			t.Errorf("test %q: Prompt is empty", tc.ID)
+		}
+		if tc.Eval == nil {
+			t.Errorf("test %q: Eval is nil", tc.ID)
+		}
+		if tc.Description == "" {
+			t.Errorf("test %q: Description is empty", tc.ID)
+		}
+		counts[tc.Subcategory]++
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tc.Eval.Evaluate(context.Background(), tt.response)
-			if got.Value != tt.want {
-				t.Errorf("Eval.Evaluate(%q) = %v, want %v (detail: %s)", tt.response, got.Value, tt.want, got.Detail)
-			}
-		})
+	for _, sub := range []string{"tool-routing", "planning", "delegation"} {
+		if counts[sub] != 10 {
+			t.Errorf("subcategory %q: got %d tests, want 10", sub, counts[sub])
+		}
 	}
 }
