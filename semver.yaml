@@ -1,0 +1,20 @@
+version: 1
+force:
+  existing: true
+blacklist:
+  - "Merge branch"
+  - "Merge pull request"
+wording:
+  patch:
+    - fix
+    - chore
+    - docs
+    - style
+    - refactor
+    - perf
+    - ci
+  minor:
+    - feat
+  major:
+    - "breaking change"
+    - "major overhaul"

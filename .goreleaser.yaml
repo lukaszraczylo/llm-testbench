@@ -1,0 +1,78 @@
+version: 2
+
+project_name: llm-testbench
+
+before:
+  hooks:
+    # Read-only verification only - release tooling must not mutate the tree.
+    - go mod verify
+
+builds:
+  - id: llmtest
+    main: ./cmd/llmtest
+    binary: llmtest
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version=v{{ .Version }}
+
+archives:
+  - id: llmtest
+    ids: [llmtest]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+dockers:
+  - id: llmtest-amd64
+    ids: [llmtest]
+    goarch: amd64
+    use: buildx
+    image_templates:
+      - ghcr.io/lukaszraczylo/llm-testbench:v{{ .Version }}-amd64
+    build_flag_templates:
+      - --platform=linux/amd64
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.version=v{{ .Version }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+      - --label=org.opencontainers.image.source=https://github.com/lukaszraczylo/llm-testbench
+  - id: llmtest-arm64
+    ids: [llmtest]
+    goarch: arm64
+    use: buildx
+    image_templates:
+      - ghcr.io/lukaszraczylo/llm-testbench:v{{ .Version }}-arm64
+    build_flag_templates:
+      - --platform=linux/arm64
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.version=v{{ .Version }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+      - --label=org.opencontainers.image.source=https://github.com/lukaszraczylo/llm-testbench
+
+docker_manifests:
+  - name_template: ghcr.io/lukaszraczylo/llm-testbench:v{{ .Version }}
+    image_templates:
+      - ghcr.io/lukaszraczylo/llm-testbench:v{{ .Version }}-amd64
+      - ghcr.io/lukaszraczylo/llm-testbench:v{{ .Version }}-arm64
+  - name_template: ghcr.io/lukaszraczylo/llm-testbench:latest
+    image_templates:
+      - ghcr.io/lukaszraczylo/llm-testbench:v{{ .Version }}-amd64
+      - ghcr.io/lukaszraczylo/llm-testbench:v{{ .Version }}-arm64
+
+changelog:
+  use: github-native
+
+release:
+  github:
+    owner: lukaszraczylo
+    name: llm-testbench
+  draft: false
+  prerelease: auto

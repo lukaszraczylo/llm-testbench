@@ -21,6 +21,10 @@ import (
 // it is not exposed as a flag.
 const requestTemperature = 0.0
 
+// version is stamped by the release build via
+// -ldflags "-X main.version=vX.Y.Z"; a source build reports "dev".
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -33,6 +37,9 @@ func main() {
 		err = runCommand(os.Args[2:])
 	case "list":
 		err = listCommand(os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Println("llmtest " + version)
+		return
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -54,6 +61,7 @@ func usage() {
 Usage:
   llmtest run  [flags]   Run the test catalog against configured models.
   llmtest list [flags]   List the test catalog.
+  llmtest version        Print the build version.
 
 Run "llmtest run -h" or "llmtest list -h" for flag details.
 `)
