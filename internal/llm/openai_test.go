@@ -236,7 +236,9 @@ func TestOpenAIClient_Complete_NoRetryOn4xx(t *testing.T) {
 }
 
 func TestOpenAIClient_Complete_APIErrorField(t *testing.T) {
+	var calls int32
 	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
 		_, _ = w.Write([]byte(`{"error":{"message":"model overloaded"}}`))
 	})
 
@@ -247,6 +249,55 @@ func TestOpenAIClient_Complete_APIErrorField(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "model overloaded") {
 		t.Errorf("error = %v, want mention of model overloaded", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != maxRetries+1 {
+		t.Errorf("calls = %d, want %d (2xx-with-error-body is retried like a 5xx)", got, maxRetries+1)
+	}
+}
+
+func TestOpenAIClient_Complete_RetriesAPIErrorThenSucceeds(t *testing.T) {
+	var calls int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			_, _ = w.Write([]byte(`{"error":{"message":"replica warming"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	})
+
+	client := NewOpenAIClient(srv.URL, "", time.Second)
+	resp, err := client.Complete(context.Background(), Request{Model: "m", Messages: []Message{{Role: "user", Content: "x"}}})
+	if err != nil {
+		t.Fatalf("Complete() error = %v, want nil", err)
+	}
+	if resp.Text != "ok" {
+		t.Errorf("Text = %q, want %q", resp.Text, "ok")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("calls = %d, want 2 (one error body, one success)", got)
+	}
+}
+
+func TestOpenAIClient_Complete_RetriesOn429ThenSucceeds(t *testing.T) {
+	var calls int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	})
+
+	client := NewOpenAIClient(srv.URL, "", time.Second)
+	resp, err := client.Complete(context.Background(), Request{Model: "m", Messages: []Message{{Role: "user", Content: "x"}}})
+	if err != nil {
+		t.Fatalf("Complete() error = %v, want nil", err)
+	}
+	if resp.Text != "ok" {
+		t.Errorf("Text = %q, want %q", resp.Text, "ok")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("calls = %d, want 2 (one 429, one success)", got)
 	}
 }
 

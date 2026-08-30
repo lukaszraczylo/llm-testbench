@@ -135,8 +135,12 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 			finishReason = resp.Choices[0].FinishReason
 		}
 		if resp.Error != nil {
+			// A 2xx carrying a JSON error body is how some gateways report a
+			// transient upstream failure (observed as instant 0-token
+			// "errors" in the 2026-08-30 run while a replica was warming).
+			// Treat it like a 5xx: retry within the same attempt budget.
 			lastErr = fmt.Errorf("llm: api error: %s", resp.Error.Message)
-			return Response{}, lastErr
+			continue
 		}
 		return Response{
 			Text:             text,
@@ -190,7 +194,9 @@ func (c *OpenAIClient) doRequest(ctx context.Context, payload []byte) (*chatComp
 		return nil, &retryableError{err: fmt.Errorf("read body: %w", err)}
 	}
 
-	if httpResp.StatusCode >= 500 {
+	// 429 is as transient as a 5xx for a self-hosted gateway (rate limit or
+	// a briefly saturated upstream); retry it with the same backoff budget.
+	if httpResp.StatusCode >= 500 || httpResp.StatusCode == http.StatusTooManyRequests {
 		return nil, &retryableError{status: httpResp.StatusCode}
 	}
 	if httpResp.StatusCode >= 400 {
