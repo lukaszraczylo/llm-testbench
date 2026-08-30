@@ -5,7 +5,7 @@ models:
   - uni/qwen3.6-27b
   - uni/btl-4
 concurrency: 8         # default when omitted; matches internal/config's default
-request_timeout: 300s  # default when omitted
+request_timeout: 900s  # default when omitted
 max_tokens_default: 12000  # default when omitted; a reasoning model can spend
                             # thousands of tokens on reasoning_content before
                             # writing an answer, so this must stay generous

@@ -161,9 +161,14 @@ func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) Re
 		Temperature: r.cfg.Temperature,
 	}
 
+	// Wall-clock across all attempts, recorded even on error: an error row
+	// with zero latency reads as an instant rejection when it may be three
+	// exhausted timeouts (a 651-second generation looked "instant" in the
+	// 2026-08-30 run and misdirected the diagnosis).
+	callStart := time.Now()
 	resp, err := r.client.Complete(ctx, req)
 	if err != nil {
-		return Result{Model: model, TestID: test.ID, Err: err}
+		return Result{Model: model, TestID: test.ID, Err: err, Latency: time.Since(callStart)}
 	}
 
 	normalized := testkit.Normalize(resp.Text)
