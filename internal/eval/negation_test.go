@@ -22,6 +22,58 @@ func TestNoUnnegatedMention(t *testing.T) {
 		{"post-window 'insecure' adjectival cue", "MD5 is insecure for this purpose.", 1},
 		{"post-window 'predictable' adjectival cue", "MD5 output is predictable given no work factor.", 1},
 		{"bare 'no:' cue", "no: MD5 lacks a tunable work factor.", 1},
+		// Regression fixtures from the 2026-08-30 3-model run: all four shapes
+		// below zeroed correct answers from every model tested.
+		{
+			name:     "abbreviation dot does not cut the clause window ('e.g.,')",
+			response: "Do not edit the live values directly (e.g., MD5 configuration) since drift follows.",
+			want:     1,
+		},
+		{
+			name:     "abbreviation dot with space does not cut the clause window ('e.g. ')",
+			response: "Do not reach for weak digests, e.g. MD5, in any password path.",
+			want:     1,
+		},
+		{
+			name:     "mid-token version dot does not cut the clause window",
+			response: "Using v2.4 of the library with MD5 should never be done for passwords.",
+			want:     1,
+		},
+		{
+			name:     "markdown bold and backticks do not inflate the cue distance",
+			response: "You should **not** store passwords hashed by any weak digest like `MD5` here.",
+			want:     1,
+		},
+		{
+			name:     "consequence-description cue 'deterministic' negates",
+			response: "MD5 here acts as a deterministic mapping an attacker can precompute.",
+			want:     1,
+		},
+		{
+			name:     "consequence-description cue 'silently overwriting' negates",
+			response: "Choosing MD5 means silently overwriting your security margin.",
+			want:     1,
+		},
+		{
+			name:     "sentence-ending dot still cuts the window",
+			response: "Never trust the old design. Hash the password with MD5 today.",
+			want:     0,
+		},
+		{
+			name:     "blank lines around a fenced display block do not cut the window",
+			response: "A digest like:\n\n```text\nMD5\n```\n\nshould never touch a password path.",
+			want:     1,
+		},
+		{
+			name:     "one cue distributes over a comma enumeration in the same clause",
+			response: "Do not protect anything using outdated digests such as MD5, or an unsalted MD5, or a doubled MD5 for that matter.",
+			want:     1,
+		},
+		{
+			name:     "enumeration inheritance stops at a sentence boundary",
+			response: "Never rely on MD5 for new designs. MD5 is what this legacy tool emits, so wire MD5 into the new verifier as-is.",
+			want:     0,
+		},
 		{
 			name:     "clause-scoped: cue in an unrelated PRECEDING sentence does not count",
 			response: "Never mind the deployment steps. Just hash the password with MD5.",
