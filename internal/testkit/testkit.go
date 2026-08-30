@@ -10,10 +10,17 @@ import (
 	"strings"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
+	"github.com/lukaszraczylo/llm-testbench/internal/llm"
 )
 
 // Test is one catalog entry: a fully self-contained prompt scored by a
 // deterministic Evaluator.
+//
+// When Tools is non-empty, the test exercises function-calling: the runner
+// advertises the tools (tool_choice auto), then serializes the model's tool
+// calls into the canonical JSON envelope the eval.ToolCalled/
+// ToolCallWithArgs/ToolSequence/NoToolCalled evaluators parse. The Eval for
+// such a test scores that envelope, not the model's free-text answer.
 type Test struct {
 	Eval        eval.Evaluator
 	ID          string
@@ -22,6 +29,7 @@ type Test struct {
 	Description string
 	System      string
 	Prompt      string
+	Tools       []llm.Tool
 	MaxTokens   int
 }
 

@@ -40,7 +40,9 @@ func NewOpenAIClient(endpoint, apiKey string, timeout time.Duration) *OpenAIClie
 
 type chatCompletionRequest struct {
 	Model       string    `json:"model"`
+	ToolChoice  string    `json:"tool_choice,omitempty"`
 	Messages    []chatMsg `json:"messages"`
+	Tools       []apiTool `json:"tools,omitempty"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Temperature float64   `json:"temperature"`
 }
@@ -48,6 +50,28 @@ type chatCompletionRequest struct {
 type chatMsg struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+// apiTool is the OpenAI tools[] wire shape: {"type":"function","function":{...}}.
+type apiTool struct {
+	Function apiToolFunction `json:"function"`
+	Type     string          `json:"type"`
+}
+
+type apiToolFunction struct {
+	Parameters  map[string]any `json:"parameters,omitempty"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+}
+
+// apiToolCall is the OpenAI tool_calls[] wire shape. Function.Arguments is a
+// JSON-encoded STRING, not a nested object, per the OpenAI spec.
+type apiToolCall struct {
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+	Type string `json:"type"`
 }
 
 // responseMsg is the assistant message inside one response choice. Content
@@ -61,8 +85,9 @@ type chatMsg struct {
 // Deliberately not evaluated: reasoning_content. The catalog's evaluators
 // score the answer a user would actually see, which is content only.
 type responseMsg struct {
-	Content *string `json:"content"`
-	Role    string  `json:"role"`
+	Content   *string       `json:"content"`
+	Role      string        `json:"role"`
+	ToolCalls []apiToolCall `json:"tool_calls"`
 }
 
 // Text returns m.Content, or "" if the backend sent "content": null.
@@ -78,13 +103,39 @@ type chatCompletionResponse struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	Choices []struct {
-		Message      responseMsg `json:"message"`
 		FinishReason string      `json:"finish_reason"`
+		Message      responseMsg `json:"message"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 	} `json:"usage"`
+}
+
+// decodeToolCalls converts the OpenAI wire tool_calls into normalized
+// ToolCall values, decoding each function's JSON-encoded argument string
+// into an object. A call whose argument string is not valid JSON is kept
+// with Decoded=false and its raw string preserved, so a test can still see
+// that the tool was named even when the model emitted malformed arguments.
+func decodeToolCalls(raw []apiToolCall) []ToolCall {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, 0, len(raw))
+	for _, tc := range raw {
+		call := ToolCall{Name: tc.Function.Name, RawArguments: tc.Function.Arguments}
+		var args map[string]any
+		if tc.Function.Arguments == "" {
+			// No-argument tool call: an empty argument object, decoded.
+			call.Arguments = map[string]any{}
+			call.Decoded = true
+		} else if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
+			call.Arguments = args
+			call.Decoded = true
+		}
+		out = append(out, call)
+	}
+	return out
 }
 
 // Complete implements Client. It retries transport failures and 5xx
@@ -97,6 +148,17 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 	}
 	for _, m := range req.Messages {
 		body.Messages = append(body.Messages, chatMsg(m))
+	}
+	if len(req.Tools) > 0 {
+		// tool_choice "auto" lets the model decide whether and which tool to
+		// call: the honest test of both "must call X" and "needs no tool".
+		body.ToolChoice = "auto"
+		for _, t := range req.Tools {
+			body.Tools = append(body.Tools, apiTool{
+				Type:     "function",
+				Function: apiToolFunction(t),
+			})
+		}
 	}
 
 	payload, err := json.Marshal(body)
@@ -130,9 +192,11 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 
 		latency := time.Since(attemptStart)
 		var text, finishReason string
+		var toolCalls []ToolCall
 		if len(resp.Choices) > 0 {
 			text = resp.Choices[0].Message.Text()
 			finishReason = resp.Choices[0].FinishReason
+			toolCalls = decodeToolCalls(resp.Choices[0].Message.ToolCalls)
 		}
 		if resp.Error != nil {
 			// A 2xx carrying a JSON error body is how some gateways report a
@@ -145,6 +209,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 		return Response{
 			Text:             text,
 			FinishReason:     finishReason,
+			ToolCalls:        toolCalls,
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			Latency:          latency,

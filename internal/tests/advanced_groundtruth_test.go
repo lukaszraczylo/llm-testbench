@@ -27,6 +27,14 @@ func TestAdvancedGroundTruthScoresFull(t *testing.T) {
 		"adv-code-conflicting-evidence":      `{"port": 9090, "authoritative": "config"}`,
 		"adv-sec-exploit-chain":              `{"vuln": "open-redirect"}`,
 		"adv-sec-rotation-blast-radius":      `30`,
+		"ultra-c-int8-signed":                `-76`,
+		"ultra-hard-modexp":                  `5`,
+		"ultra-hard-fp-equality":             `{"equal": false}`,
+		"ultra-py-bankers-round":             `6`,
+		"ultra-sec-redos":                    `{"vulnerable": true}`,
+		"ultra-scen-cap-partition":           `{"sacrificed": "availability"}`,
+		"ultra-ai-pq-bytes":                  `16`,
+		"ultra-sql-deadlock-cycle":           `{"fix": "consistent-lock-order"}`,
 	}
 
 	byID := map[string]int{}

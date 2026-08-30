@@ -4,6 +4,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"sync/atomic"
 	"time"
 
@@ -13,6 +14,35 @@ import (
 	"github.com/lukaszraczylo/llm-testbench/internal/llm"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
+
+// serializeToolEnvelope renders a response's tool calls into the canonical
+// JSON envelope the eval.ToolCalled family parses: {"tool_calls":[{"name":
+// ...,"arguments":{...}}],"content":...}. A tool call whose arguments the
+// model emitted as malformed JSON serializes with a null arguments object
+// and arguments_malformed=true so a test can still see the call happened.
+func serializeToolEnvelope(resp llm.Response) string {
+	type envItem struct {
+		Arguments map[string]any `json:"arguments"`
+		Name      string         `json:"name"`
+		Malformed bool           `json:"arguments_malformed,omitempty"`
+	}
+	env := struct {
+		Content   string    `json:"content"`
+		ToolCalls []envItem `json:"tool_calls"`
+	}{Content: resp.Text, ToolCalls: []envItem{}}
+	for _, c := range resp.ToolCalls {
+		env.ToolCalls = append(env.ToolCalls, envItem{
+			Name:      c.Name,
+			Arguments: c.Arguments,
+			Malformed: !c.Decoded,
+		})
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return `{"tool_calls":[],"content":""}`
+	}
+	return string(b)
+}
 
 // truncatedDetailPrefix is prepended to Score.Detail when the model's
 // response was cut off by the token budget (llm.FinishReasonLength), so
@@ -157,6 +187,7 @@ func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) Re
 	req := llm.Request{
 		Model:       model,
 		Messages:    messages,
+		Tools:       test.Tools,
 		MaxTokens:   maxTokens,
 		Temperature: r.cfg.Temperature,
 	}
@@ -171,8 +202,17 @@ func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) Re
 		return Result{Model: model, TestID: test.ID, Err: err, Latency: time.Since(callStart)}
 	}
 
-	normalized := testkit.Normalize(resp.Text)
-	score := test.Eval.Evaluate(ctx, normalized)
+	// A function-calling test is scored on the tool-call envelope, not the
+	// free-text answer: serialize the model's tool calls into the canonical
+	// JSON the eval.ToolCalled family parses. The envelope is also what gets
+	// stored as ResponseText, so the artifact shows exactly what was scored.
+	var scored string
+	if len(test.Tools) > 0 {
+		scored = serializeToolEnvelope(resp)
+	} else {
+		scored = testkit.Normalize(resp.Text)
+	}
+	score := test.Eval.Evaluate(ctx, scored)
 	if resp.FinishReason == llm.FinishReasonLength {
 		score.Detail = truncatedDetailPrefix + score.Detail
 	}
@@ -181,7 +221,7 @@ func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) Re
 		Model:            model,
 		TestID:           test.ID,
 		Score:            score,
-		ResponseText:     normalized,
+		ResponseText:     scored,
 		FinishReason:     resp.FinishReason,
 		Latency:          resp.Latency,
 		PromptTokens:     resp.PromptTokens,

@@ -26,12 +26,12 @@ func newTestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 // element type, so callers can append() it without repeating the anonymous
 // struct type at each call site.
 func testChoice(content, finishReason string) struct {
-	Message      responseMsg `json:"message"`
 	FinishReason string      `json:"finish_reason"`
+	Message      responseMsg `json:"message"`
 } {
 	return struct {
-		Message      responseMsg `json:"message"`
 		FinishReason string      `json:"finish_reason"`
+		Message      responseMsg `json:"message"`
 	}{
 		Message:      responseMsg{Role: "assistant", Content: &content},
 		FinishReason: finishReason,
@@ -327,5 +327,70 @@ func TestOpenAIClient_Complete_SendsAPIKey(t *testing.T) {
 	_, err := client.Complete(context.Background(), Request{Model: "m", Messages: []Message{{Role: "user", Content: "x"}}})
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
+	}
+}
+
+func TestOpenAIClient_Complete_ParsesToolCalls(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var body chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		// The client must advertise tools with tool_choice auto.
+		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "get_weather" {
+			t.Errorf("tools not sent correctly: %+v", body.Tools)
+		}
+		if body.ToolChoice != "auto" {
+			t.Errorf("tool_choice = %q, want auto", body.ToolChoice)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[` +
+			`{"type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\",\"units\":\"c\"}"}}` +
+			`]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":9}}`))
+	})
+
+	client := NewOpenAIClient(srv.URL, "", time.Second)
+	resp, err := client.Complete(context.Background(), Request{
+		Model:    "m",
+		Messages: []Message{{Role: "user", Content: "weather in Paris?"}},
+		Tools: []Tool{{
+			Name:        "get_weather",
+			Description: "Get weather for a city",
+			Parameters:  map[string]any{"type": "object"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("got %d tool calls, want 1", len(resp.ToolCalls))
+	}
+	tc := resp.ToolCalls[0]
+	if tc.Name != "get_weather" || !tc.Decoded {
+		t.Errorf("tool call = %+v", tc)
+	}
+	if tc.Arguments["city"] != "Paris" || tc.Arguments["units"] != "c" {
+		t.Errorf("arguments = %v", tc.Arguments)
+	}
+}
+
+func TestOpenAIClient_Complete_MalformedToolArgs(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[` +
+			`{"type":"function","function":{"name":"f","arguments":"{not valid json"}}` +
+			`]},"finish_reason":"tool_calls"}],"usage":{}}`))
+	})
+	client := NewOpenAIClient(srv.URL, "", time.Second)
+	resp, err := client.Complete(context.Background(), Request{
+		Model: "m", Messages: []Message{{Role: "user", Content: "x"}},
+		Tools: []Tool{{Name: "f"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Decoded {
+		t.Fatalf("expected 1 undecoded tool call, got %+v", resp.ToolCalls)
+	}
+	if resp.ToolCalls[0].RawArguments != "{not valid json" {
+		t.Errorf("raw args = %q", resp.ToolCalls[0].RawArguments)
 	}
 }
