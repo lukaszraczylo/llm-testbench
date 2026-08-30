@@ -15,7 +15,10 @@ import (
 const apiKeyEnvVar = "LLMTB_API_KEY" // #nosec G101 -- this is an env var *name*, not a credential value
 
 // Defaults applied when the corresponding YAML key is omitted (or explicit
-// zero). max_tokens_default was raised from 4000 to 12000 after a live run
+// zero). max_tokens_default was raised from 4000 to 12000, then to 40000
+// (2026-08-30: at 25000 the heaviest thinking-model tests still exhausted
+// the whole budget on reasoning and scored 0 with an empty answer, e.g.
+// ts-eslint-flat-config on qwen3.8-flash-next), after a live run
 // showed reasoning models spend thousands of completion tokens on
 // reasoning_content before writing an answer to content: a small
 // per-test/default budget truncates the answer (finish_reason=length)
@@ -23,7 +26,7 @@ const apiKeyEnvVar = "LLMTB_API_KEY" // #nosec G101 -- this is an env var *name*
 const (
 	defaultConcurrency    = 8
 	defaultRequestTimeout = 300 * time.Second
-	defaultMaxTokens      = 12000
+	defaultMaxTokens      = 40000
 )
 
 // Config is the top-level configuration loaded from config.yaml.
