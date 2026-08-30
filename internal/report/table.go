@@ -26,8 +26,8 @@ func (ew *errWriter) println(args ...any) {
 	_, ew.err = fmt.Fprintln(ew.w, args...)
 }
 
-// renderTable writes three plain-text tables: per-test scores, category
-// rollup, and model summary.
+// renderTable writes four plain-text tables: per-test scores, category
+// rollup, discrimination/stability rollup, and model summary.
 func renderTable(w io.Writer, tests []testkit.Test, models []string, results []runner.Result) error {
 	idx := indexResults(results)
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
@@ -37,7 +37,9 @@ func renderTable(w io.Writer, tests []testkit.Test, models []string, results []r
 	ew.println()
 	writeCategoryTable(ew, tests, models, idx)
 	ew.println()
-	writeSummaryTable(ew, models, results)
+	writeDiscriminationTable(ew, testStats(tests, models, idx), len(models) > 1)
+	ew.println()
+	writeSummaryTable(ew, models, idx)
 	if ew.err != nil {
 		return ew.err
 	}
@@ -45,7 +47,7 @@ func renderTable(w io.Writer, tests []testkit.Test, models []string, results []r
 	return tw.Flush()
 }
 
-func writeScoreTable(ew *errWriter, tests []testkit.Test, models []string, idx resultIndex) {
+func writeScoreTable(ew *errWriter, tests []testkit.Test, models []string, idx cellIndex) {
 	ew.println("== Per-test scores ==")
 	header := []string{"TEST", "CATEGORY", "SUBCATEGORY"}
 	header = append(header, models...)
@@ -55,9 +57,9 @@ func writeScoreTable(ew *errWriter, tests []testkit.Test, models []string, idx r
 	for _, t := range sortedTests(tests) {
 		row := []string{t.ID, t.Category, t.Subcategory}
 		for _, model := range models {
-			r, ok := idx[t.ID][model]
-			row = append(row, cellText(r, ok))
-			anyTruncated = anyTruncated || r.Truncated()
+			c := idx[t.ID][model]
+			row = append(row, cellText(c))
+			anyTruncated = anyTruncated || c.result.Truncated()
 		}
 		ew.println(strings.Join(row, "\t"))
 	}
@@ -66,7 +68,7 @@ func writeScoreTable(ew *errWriter, tests []testkit.Test, models []string, idx r
 	}
 }
 
-func writeCategoryTable(ew *errWriter, tests []testkit.Test, models []string, idx resultIndex) {
+func writeCategoryTable(ew *errWriter, tests []testkit.Test, models []string, idx cellIndex) {
 	ew.println("== Category rollup (mean score) ==")
 	header := append([]string{"CATEGORY"}, models...)
 	ew.println(strings.Join(header, "\t"))
@@ -80,11 +82,82 @@ func writeCategoryTable(ew *errWriter, tests []testkit.Test, models []string, id
 	}
 }
 
-func writeSummaryTable(ew *errWriter, models []string, results []runner.Result) {
+// writeDiscriminationTable lists the tests that actually measure
+// something: cross-model spread >= DiscriminationSpread, or attempts that
+// disagreed under --repeat. With a single model there is no spread to
+// speak of, so the non-passing tests are listed instead.
+func writeDiscriminationTable(ew *errWriter, stats []testStat, multiModel bool) {
+	writeDiscriminationRows(tablePrinter{ew: ew}, stats, multiModel)
+}
+
+// discriminationSink abstracts the tab (table) vs pipe (markdown) output
+// so the discrimination section is written once.
+type discriminationSink interface {
+	header(cells ...string)
+	row(cells ...string)
+	note(text string)
+}
+
+type tablePrinter struct{ ew *errWriter }
+
+func (tp tablePrinter) header(cells ...string) { tp.ew.println(strings.Join(cells, "\t")) }
+func (tp tablePrinter) row(cells ...string)    { tp.ew.println(strings.Join(cells, "\t")) }
+func (tp tablePrinter) note(text string)       { tp.ew.println(text) }
+
+func writeDiscriminationRows(sink discriminationSink, stats []testStat, multiModel bool) {
+	discriminating, unstable, scored := 0, 0, 0
+	for _, st := range stats {
+		if !st.scored {
+			continue
+		}
+		scored++
+		if st.unstable {
+			unstable++
+		}
+		if multiModel && !math.IsNaN(st.spread) && st.spread >= DiscriminationSpread {
+			discriminating++
+		}
+	}
+
+	if multiModel {
+		sink.note(fmt.Sprintf("== Discrimination: %d/%d scored tests separate models by >= %.2f; %d unstable under repeat ==",
+			discriminating, scored, DiscriminationSpread, unstable))
+	} else {
+		sink.note(fmt.Sprintf("== Discrimination: single model (no cross-model spread); %d unstable under repeat ==", unstable))
+	}
+
+	rows := interestingStats(stats, multiModel)
+	if len(rows) == 0 {
+		sink.note("no discriminating or unstable tests: every scored test passed identically for every model")
+		return
+	}
+
+	sink.header("TEST", "CATEGORY", "SUBCATEGORY", "MEAN", "SPREAD", "UNSTABLE", "TRUNC")
+	for _, st := range rows {
+		sink.row(
+			st.testID,
+			st.category,
+			st.subcategory,
+			meanCellText(st.mean),
+			meanCellText(st.spread),
+			yesNo(st.unstable),
+			yesNo(st.truncated),
+		)
+	}
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "-"
+}
+
+func writeSummaryTable(ew *errWriter, models []string, idx cellIndex) {
 	ew.println("== Model summary ==")
 	ew.println(strings.Join([]string{"MODEL", "MEAN", "PASSED", "PARTIAL", "FAILED", "ERRORS", "MEAN_LATENCY", "TOTAL_TOKENS", "TOK/S"}, "\t"))
 
-	for _, ms := range summarize(models, results) {
+	for _, ms := range summarize(models, idx) {
 		row := []string{
 			ms.model,
 			meanCellText(ms.overallMean),

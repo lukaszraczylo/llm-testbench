@@ -1,9 +1,12 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/report"
+	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
 
 func TestSplitCSV(t *testing.T) {
@@ -59,5 +62,42 @@ func TestValidateFormat(t *testing.T) {
 				t.Errorf("validateFormat(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSelectTests(t *testing.T) {
+	reg := testkit.NewRegistry()
+	reg.Register(testkit.Test{ID: "a", Category: "x", Subcategory: "s", Eval: eval.ContainsAny("a")})
+	reg.Register(testkit.Test{ID: "b", Category: "y", Subcategory: "s", Eval: eval.ContainsAny("b")})
+
+	got, err := selectTests(reg, "b,a", "", "")
+	if err != nil {
+		t.Fatalf("selectTests() error = %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "b" || got[1].ID != "a" {
+		t.Errorf("selection = %+v, want [b a] in flag order", got)
+	}
+
+	if _, err := selectTests(reg, "a,nope", "", ""); err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Errorf("unknown id error = %v, want mention of %q", err, "nope")
+	}
+
+	got, err = selectTests(reg, "", "y", "")
+	if err != nil || len(got) != 1 || got[0].ID != "b" {
+		t.Errorf("category filter = %+v, %v; want [b], nil", got, err)
+	}
+
+	if _, err := selectTests(reg, "", "zzz", ""); err == nil {
+		t.Error("empty category filter: error = nil, want no-match error")
+	}
+}
+
+func TestHealthCommand_RequiresArtifacts(t *testing.T) {
+	if err := healthCommand(nil); err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Errorf("healthCommand(nil) error = %v, want usage error", err)
+	}
+	if err := healthCommand([]string{"/nonexistent-artifact.json"}); err == nil ||
+		!strings.Contains(err.Error(), "load /nonexistent-artifact.json") {
+		t.Errorf("healthCommand(missing file) error = %v, want load error naming the file", err)
 	}
 }

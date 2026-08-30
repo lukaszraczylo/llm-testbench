@@ -9,6 +9,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/lukaszraczylo/llm-testbench/internal/eval"
+	"github.com/lukaszraczylo/llm-testbench/internal/llm"
 	"github.com/lukaszraczylo/llm-testbench/internal/runner"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
@@ -35,22 +37,125 @@ func Render(w io.Writer, format Format, tests []testkit.Test, models []string, r
 	case FormatMarkdown:
 		return renderMarkdown(w, tests, models, results)
 	case FormatJSON:
-		return renderJSON(w, tests, results)
+		return renderJSON(w, tests, models, results)
 	default:
 		return fmt.Errorf("report: unknown format %q", format)
 	}
 }
 
-// resultIndex looks up a Result by testID then model.
-type resultIndex map[string]map[string]runner.Result
+// modelCell is the aggregate view of every attempt recorded for one
+// (testID, model) pair: with Config.Repeat = 1 this is the single result;
+// with repeats the Score is the mean over scored attempts, and minScore/
+// maxScore expose the within-model spread (instability) that repeats are
+// measured to find.
+type modelCell struct {
+	result     runner.Result // representative: last scored attempt, mean score patched in
+	minScore   float64
+	maxScore   float64
+	meanTokens float64
+	attempts   int
+	scored     int
+	skippedAll bool
+	errorAll   bool
+	ok         bool
+}
 
-func indexResults(results []runner.Result) resultIndex {
-	idx := make(resultIndex)
+// cellIndex looks up the aggregate cell for a testID then model.
+type cellIndex map[string]map[string]modelCell
+
+func indexResults(results []runner.Result) cellIndex {
+	type key struct{ testID, model string }
+	grouped := make(map[key][]runner.Result)
+	order := make([]key, 0, len(results))
 	for _, r := range results {
-		if idx[r.TestID] == nil {
-			idx[r.TestID] = make(map[string]runner.Result)
+		k := key{r.TestID, r.Model}
+		if _, seen := grouped[k]; !seen {
+			order = append(order, k)
 		}
-		idx[r.TestID][r.Model] = r
+		grouped[k] = append(grouped[k], r)
+	}
+
+	idx := make(cellIndex)
+	for _, k := range order {
+		attempts := grouped[k]
+		sort.Slice(attempts, func(i, j int) bool { return attempts[i].Attempt < attempts[j].Attempt })
+
+		c := modelCell{ok: true, attempts: len(attempts)}
+		// Truncation policy: a truncated attempt was scored on partial
+		// text, so its score measures the token budget as much as the
+		// model. Attempts that finished normally are therefore preferred
+		// for the cell mean (and for the min-max instability range); only
+		// when EVERY scored attempt was cut off does the mean fall back to
+		// the truncated scores. A cell is flagged "!" whenever any attempt
+		// was truncated, clean mean or not.
+		var sum, toks, cleanSum, cleanToks float64
+		var cleanN, scoredN int
+		var cleanMin, cleanMax float64
+		var anyTrunc bool
+		var last, lastClean runner.Result
+		for _, a := range attempts {
+			last = a
+			switch {
+			case a.Err != nil:
+				continue
+			case a.Score.Skipped:
+				continue
+			}
+			v := a.Score.Value
+			sum += v
+			toks += float64(a.TotalTokens())
+			scoredN++
+			if a.Truncated() {
+				anyTrunc = true
+				continue
+			}
+			if cleanN == 0 {
+				cleanMin, cleanMax = v, v
+			} else {
+				cleanMin = math.Min(cleanMin, v)
+				cleanMax = math.Max(cleanMax, v)
+			}
+			cleanSum += v
+			cleanToks += float64(a.TotalTokens())
+			cleanN++
+			lastClean = a
+		}
+		c.scored = scoredN
+
+		rep := last
+		if cleanN > 0 {
+			rep = lastClean
+		}
+		switch {
+		case scoredN > 0 && cleanN > 0:
+			rep.Score = eval.Score{
+				Value:  cleanSum / float64(cleanN),
+				Detail: lastClean.Score.Detail,
+			}
+			c.minScore, c.maxScore = cleanMin, cleanMax
+			c.meanTokens = cleanToks / float64(cleanN)
+			if anyTrunc {
+				rep.FinishReason = llm.FinishReasonLength
+			}
+		case scoredN > 0:
+			rep.Score = eval.Score{
+				Value:  sum / float64(scoredN),
+				Detail: last.Score.Detail,
+			}
+			c.minScore, c.maxScore = rep.Score.Value, rep.Score.Value
+			c.meanTokens = toks / float64(scoredN)
+			rep.FinishReason = llm.FinishReasonLength
+		case c.attempts > 0 && last.Score.Skipped:
+			c.skippedAll = true
+		case c.attempts > 0 && last.Err != nil:
+			c.errorAll = true
+		}
+
+		c.result = rep
+		if idx[k.testID] == nil {
+			idx[k.testID] = make(map[string]modelCell)
+		}
+		idx[k.testID][k.model] = c
 	}
 	return idx
 }
@@ -72,34 +177,41 @@ func sortedTests(tests []testkit.Test) []testkit.Test {
 	return out
 }
 
-// truncatedSuffix marks a cell whose underlying response was cut off by
-// the token budget (finish_reason=length): the score may not reflect what
-// the model would have answered with a larger budget. truncatedLegend is
-// the one-line explanation printed once per table/markdown report.
+// truncatedSuffix marks a cell where any attempt was cut off by the token
+// budget (finish_reason=length). Per the truncation policy in
+// indexResults, the cell mean then comes from the attempts that finished
+// normally; "!" warns that at least one sample was discarded (or, when no
+// attempt finished, that the whole mean is partial-text based).
+// truncatedLegend is the one-line explanation printed once per
+// table/markdown report.
 const (
 	truncatedSuffix = "!"
-	truncatedLegend = "! = response truncated by the token budget (finish_reason=length); increase max_tokens_default to avoid"
+	truncatedLegend = "! = some attempt was truncated by the token budget (finish_reason=length); the mean uses only attempts that finished, increase max_tokens_default if every attempt is flagged"
 )
 
 // cellText renders one (test, model) cell for the score table: "score
 // (Ntok)" for a scored result, or ERR/skip/N/A otherwise, with a
-// truncatedSuffix appended when the response was cut off by the token
-// budget.
-func cellText(r runner.Result, found bool) string {
-	if !found {
+// truncatedSuffix appended when any attempt was cut off by the token
+// budget. With repeat attempts, a "[min-max]" range is appended when the
+// attempts disagreed, marking the cell unstable.
+func cellText(c modelCell) string {
+	if !c.ok {
+		return "N/A"
+	}
+	switch {
+	case c.errorAll:
+		return "ERR"
+	case c.skippedAll:
+		return "skip"
+	case c.scored == 0:
 		return "N/A"
 	}
 
-	var text string
-	switch {
-	case r.Err != nil:
-		text = "ERR"
-	case r.Score.Skipped:
-		text = "skip"
-	default:
-		text = fmt.Sprintf("%.2f (%dtok)", r.Score.Value, r.TotalTokens())
+	text := fmt.Sprintf("%.2f (%dtok)", c.result.Score.Value, int(math.Round(c.meanTokens)))
+	if c.attempts > 1 && c.maxScore > c.minScore {
+		text += fmt.Sprintf(" [%0.2f-%0.2f]", c.minScore, c.maxScore)
 	}
-	if r.Truncated() {
+	if c.result.Truncated() {
 		text += truncatedSuffix
 	}
 	return text
@@ -112,7 +224,7 @@ type categoryMean struct {
 	category string
 }
 
-func categoryRollup(tests []testkit.Test, models []string, idx resultIndex) []categoryMean {
+func categoryRollup(tests []testkit.Test, models []string, idx cellIndex) []categoryMean {
 	order := make([]string, 0)
 	byCategory := make(map[string][]testkit.Test)
 	for _, t := range sortedTests(tests) {
@@ -129,11 +241,11 @@ func categoryRollup(tests []testkit.Test, models []string, idx resultIndex) []ca
 			var sum float64
 			var n int
 			for _, t := range byCategory[cat] {
-				r, ok := idx[t.ID][model]
-				if !ok || r.Err != nil || r.Score.Skipped {
+				c, ok := idx[t.ID][model]
+				if !ok || c.errorAll || c.skippedAll || c.scored == 0 {
 					continue
 				}
-				sum += r.Score.Value
+				sum += c.result.Score.Value
 				n++
 			}
 			if n > 0 {
@@ -191,49 +303,49 @@ type modelSummary struct {
 	avgTokPerSec float64 // math.NaN() when no timed, non-skipped data
 }
 
-func summarize(models []string, results []runner.Result) []modelSummary {
-	byModel := make(map[string][]runner.Result, len(models))
-	for _, r := range results {
-		byModel[r.Model] = append(byModel[r.Model], r)
-	}
-
+// summarize aggregates one model's results per test (attempts already
+// merged by indexResults), so pass/partial/fail counts stay per-test even
+// with Config.Repeat > 1.
+func summarize(models []string, idx cellIndex) []modelSummary {
 	out := make([]modelSummary, 0, len(models))
 	for _, model := range models {
 		ms := modelSummary{model: model}
-		var scoreSum float64
-		var scoredCount int
+		var scoreSum, latencySecondsSum, meanTokenSum float64
+		var scoredCount, latencyCount int
 		var latencySum time.Duration
-		var latencyCount int
-		var completionTokenSum int
-		var latencySecondsSum float64
 
-		for _, r := range byModel[model] {
-			ms.totalTokens += r.TotalTokens()
-			switch {
-			case r.Err != nil:
-				ms.errors++
+		for _, cells := range idx {
+			c, ok := cells[model]
+			if !ok {
 				continue
-			case r.Score.Skipped:
+			}
+			meanTokenSum += c.meanTokens * float64(max(c.scored, 1))
+			if c.errorAll {
+				ms.errors += c.attempts
+				continue
+			}
+			if c.skippedAll || c.scored == 0 {
 				continue
 			}
 
-			scoreSum += r.Score.Value
+			v := c.result.Score.Value
+			scoreSum += v
 			scoredCount++
-			latencySum += r.Latency
+			latencySum += c.result.Latency
 			latencyCount++
-			completionTokenSum += r.CompletionTokens
-			latencySecondsSum += r.Latency.Seconds()
+			latencySecondsSum += c.result.Latency.Seconds()
 
 			switch {
-			case r.Score.Value >= passThreshold:
+			case v >= passThreshold:
 				ms.passed++
-			case r.Score.Value <= 0:
+			case v <= 0:
 				ms.failed++
 			default:
 				ms.partial++
 			}
 		}
 
+		ms.totalTokens = int(math.Round(meanTokenSum))
 		if scoredCount > 0 {
 			ms.overallMean = scoreSum / float64(scoredCount)
 			ms.meanLatency = latencySum / time.Duration(latencyCount)
@@ -241,11 +353,11 @@ func summarize(models []string, results []runner.Result) []modelSummary {
 			ms.overallMean = math.NaN()
 		}
 
-		// Aggregate ratio (sum of completion tokens over sum of elapsed
-		// seconds), not a mean of per-test ratios: robust to a handful of
-		// very short responses skewing a per-test-averaged rate.
+		// Aggregate ratio (completion tokens over elapsed seconds for the
+		// representative attempt), not a mean of per-test ratios: robust to
+		// a handful of very short responses skewing a per-test-averaged rate.
 		if latencySecondsSum > 0 {
-			ms.avgTokPerSec = float64(completionTokenSum) / latencySecondsSum
+			ms.avgTokPerSec = float64(ms.totalTokens) / latencySecondsSum
 		} else {
 			ms.avgTokPerSec = math.NaN()
 		}

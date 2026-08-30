@@ -377,3 +377,36 @@ func TestRunner_Run_TracksLatencyAndTokens(t *testing.T) {
 		t.Errorf("Latency = %v, want 42ms", results[0].Latency)
 	}
 }
+
+func TestRunner_Run_RepeatSamplesEachCombination(t *testing.T) {
+	client := &mockClient{}
+	r := New(client, Config{Concurrency: 2, MaxTokensDefault: 100, Repeat: 3})
+
+	tests := []testkit.Test{{ID: "t1", Category: "c", Prompt: "p1", Eval: echoEval()}}
+	models := []string{"model-a", "model-b"}
+
+	results := r.Run(context.Background(), models, tests)
+
+	if len(results) != 6 {
+		t.Fatalf("len(results) = %d, want 6 (2 models x 1 test x 3 repeats)", len(results))
+	}
+	seen := make(map[[2]string][]int)
+	for _, res := range results {
+		k := [2]string{res.Model, res.TestID}
+		seen[k] = append(seen[k], res.Attempt)
+	}
+	for k, attempts := range seen {
+		if len(attempts) != 3 {
+			t.Errorf("%v: %d attempts, want 3", k, len(attempts))
+		}
+		got := map[int]bool{}
+		for _, a := range attempts {
+			got[a] = true
+		}
+		for a := range 3 {
+			if !got[a] {
+				t.Errorf("%v: missing attempt %d (have %v)", k, a, attempts)
+			}
+		}
+	}
+}

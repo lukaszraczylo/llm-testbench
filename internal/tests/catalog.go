@@ -23,5 +23,8 @@ func All() *testkit.Registry {
 	registerSecurityTests(r)
 	registerDeliveryTests(r)
 	registerAITests(r)
+	registerHardTests(r)
+	registerScenarioTests(r)
+	registerSaturationTests(r)
 	return r
 }

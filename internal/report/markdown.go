@@ -10,8 +10,8 @@ import (
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
 
-// renderMarkdown writes the same three tables as renderTable, formatted as
-// GitHub-flavored markdown tables.
+// renderMarkdown writes the same four sections as renderTable, formatted
+// as GitHub-flavored markdown tables.
 func renderMarkdown(w io.Writer, tests []testkit.Test, models []string, results []runner.Result) error {
 	idx := indexResults(results)
 	ew := &errWriter{w: w}
@@ -24,9 +24,9 @@ func renderMarkdown(w io.Writer, tests []testkit.Test, models []string, results 
 	for _, t := range sortedTests(tests) {
 		row := []string{t.ID, t.Category, t.Subcategory}
 		for _, model := range models {
-			r, ok := idx[t.ID][model]
-			row = append(row, cellText(r, ok))
-			anyTruncated = anyTruncated || r.Truncated()
+			c := idx[t.ID][model]
+			row = append(row, cellText(c))
+			anyTruncated = anyTruncated || c.result.Truncated()
 		}
 		writeMarkdownRow(ew, row)
 	}
@@ -49,10 +49,15 @@ func renderMarkdown(w io.Writer, tests []testkit.Test, models []string, results 
 	}
 
 	ew.println()
+	ew.println("## Discrimination")
+	ew.println()
+	writeDiscriminationRows(markdownPrinter{ew: ew}, testStats(tests, models, idx), len(models) > 1)
+
+	ew.println()
 	ew.println("## Model summary")
 	ew.println()
 	writeMarkdownHeader(ew, []string{"Model", "Mean", "Passed", "Partial", "Failed", "Errors", "Mean latency", "Total tokens", "Tok/s"})
-	for _, ms := range summarize(models, results) {
+	for _, ms := range summarize(models, idx) {
 		writeMarkdownRow(ew, []string{
 			ms.model,
 			meanCellText(ms.overallMean),
@@ -68,6 +73,18 @@ func renderMarkdown(w io.Writer, tests []testkit.Test, models []string, results 
 
 	return ew.err
 }
+
+// markdownPrinter adapts writeDiscriminationRows to pipe-delimited rows.
+// GFM needs a blank line between the note paragraph and the table, so
+// header() emits one first.
+type markdownPrinter struct{ ew *errWriter }
+
+func (mp markdownPrinter) header(cells ...string) {
+	mp.ew.println()
+	writeMarkdownHeader(mp.ew, cells)
+}
+func (mp markdownPrinter) row(cells ...string) { writeMarkdownRow(mp.ew, cells) }
+func (mp markdownPrinter) note(text string)    { mp.ew.println(text) }
 
 func writeMarkdownHeader(ew *errWriter, cols []string) {
 	ew.println("| " + strings.Join(cols, " | ") + " |")

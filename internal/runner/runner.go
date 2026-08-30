@@ -20,7 +20,9 @@ import (
 // referencing FinishReason separately.
 const truncatedDetailPrefix = "TRUNCATED: "
 
-// Result is the outcome of running one test against one model.
+// Result is the outcome of running one test against one model. Attempt is
+// the zero-based index of this sample when Config.Repeat > 1; it is 0 for
+// single-sample runs.
 type Result struct {
 	Err              error
 	Model            string
@@ -31,6 +33,7 @@ type Result struct {
 	Latency          time.Duration
 	PromptTokens     int
 	CompletionTokens int
+	Attempt          int
 }
 
 // Truncated reports whether the model's response was cut off by the token
@@ -54,6 +57,12 @@ type Config struct {
 	Concurrency      int
 	Temperature      float64
 	MaxTokensDefault int
+	// Repeat runs each (model, test) combination this many times (minimum
+	// 1). Even at temperature 0, reasoning models sample differently per
+	// call; repeats expose that instability so a score can be trusted
+	// (stable across attempts) or flagged (flaky) instead of silently
+	// treated as a capability measurement.
+	Repeat int
 }
 
 // Runner executes a set of tests against a set of models.
@@ -71,18 +80,24 @@ func New(client llm.Client, cfg Config) *Runner {
 }
 
 // Run executes every combination of models x tests, bounded by
-// cfg.Concurrency in-flight calls, and returns one Result per combination.
-// A per-call failure is captured in Result.Err rather than aborting the run.
+// cfg.Concurrency in-flight calls, and returns one Result per combination
+// (times Config.Repeat samples each). A per-call failure is captured in
+// Result.Err rather than aborting the run.
 func (r *Runner) Run(ctx context.Context, models []string, tests []testkit.Test) []Result {
 	type job struct {
-		model string
-		test  testkit.Test
+		model   string
+		test    testkit.Test
+		attempt int
 	}
 
-	jobs := make([]job, 0, len(models)*len(tests))
+	repeat := max(r.cfg.Repeat, 1)
+
+	jobs := make([]job, 0, len(models)*len(tests)*repeat)
 	for _, m := range models {
 		for _, t := range tests {
-			jobs = append(jobs, job{model: m, test: t})
+			for a := range repeat {
+				jobs = append(jobs, job{model: m, test: t, attempt: a})
+			}
 		}
 	}
 
@@ -103,6 +118,7 @@ func (r *Runner) Run(ctx context.Context, models []string, tests []testkit.Test)
 	for i, j := range jobs {
 		g.Go(func() error {
 			res := r.runOne(gctx, j.model, j.test)
+			res.Attempt = j.attempt
 			results[i] = res
 			// atomic.AddInt32 makes the completion counter safe under
 			// Config.Concurrency-many concurrent goroutines; ReportDone

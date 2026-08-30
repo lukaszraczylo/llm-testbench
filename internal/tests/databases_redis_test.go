@@ -147,9 +147,32 @@ func TestDBNoBareKeysInProd(t *testing.T) {
 			want:     0,
 		},
 		{
-			name:     "negation cue too far away to count",
+			// The guard now triggers on an endorsement-shaped mention only,
+			// and the negation window is measured from the endorsement
+			// phrase ("...run KEYS *"), not from the sentence start — so a
+			// hedging "never mind" that is still within 60 chars counts.
+			name:     "negation cue close to the endorsement phrase",
 			response: "Never mind the migration for now, but you could casually run KEYS * to check this quickly.",
+			want:     1,
+		},
+		{
+			// ground truth: same endorsement, but the cue is now >60 chars
+			// from "run KEYS *" (73), outside the window - still an
+			// unnegated recommendation.
+			name:     "negation cue too far away to count",
+			response: "Never mind everything else that was said in the earlier review about migrations, but you could casually run KEYS * to check this quickly.",
 			want:     0,
+		},
+		{
+			// Regression from the live probe (2026-08-29): a fully correct
+			// answer describes the harm ("can block", no cue word in the
+			// list) and only negates one mention ("avoid `KEYS *` unless").
+			// None of these is an endorsement, so the guard must stay at 1.
+			name: "correct probe answer: harm description without cue words",
+			response: "`KEYS *` is dangerous in production because it scans the entire keyspace synchronously.\n" +
+				"Redis is single-threaded for command execution, so `KEYS *` can block the server while it walks through millions of keys.\n" +
+				"For production code, use `SCAN` with a reasonable `COUNT`, and avoid `KEYS *` unless you are in development.",
+			want: 1,
 		},
 	}
 	for _, tt := range tests {

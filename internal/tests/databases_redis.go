@@ -159,27 +159,58 @@ pipelined commands? Respond with only "yes" or "no".`
 	}
 }
 
-// dbKeysCommandPattern matches an explicit mention of the Redis KEYS
-// command actually being invoked - "KEYS *" (its most common prod-danger
-// form) or a backtick-quoted `KEYS` - not a generic use of the English
-// word "keys" elsewhere in prose ("the keys to fixing this...").
-var dbKeysCommandPattern = regexp.MustCompile("(?:`KEYS`|\\bKEYS\\s*\\*)")
+// dbKeysEndorsementPattern matches a KEYS mention in an endorsement-shaped
+// position — a verb recommending it ("use `KEYS`", "just run KEYS *"), a
+// positive predicate ("KEYS * is fine/simplest"), or a bare imperative line
+// ("run this:\nKEYS *") — rather than every mention. The guard then still
+// requires a negation cue near such a mention (see dbNoBareKeysInProd).
+//
+// Triggering on any mention is too strict: a fully correct live answer
+// (probe, 2026-08-29) opens with "`KEYS *` is dangerous..." and later says
+// "so `KEYS *` can block the server while it walks through millions of
+// keys" — harm descriptions whose words ("can block") sit outside the
+// negation cue list, yet they are exactly the explanation the prompt asks
+// for, not an endorsement.
+//
+// The predicate branch's leading (?:^|[^...]) guard stops a hyphen-joined
+// identifier from matching mid-word and keeps the match start at the term
+// area rather than arbitrary prose.
+var dbKeysEndorsementPattern = regexp.MustCompile("(?i)(?:" +
+
+	// a verb recommending it: "use `KEYS`", "just run KEYS *", "stick with KEYS *"
+
+	"(?:use|using|used|run|running|runs|execute|executing|call|calling|should(?:\\s+(?:also|just))?|better\\s+to|go\\s+with|opt\\s+for|stick\\s+with|switch(?:ing)?\\s+(?:back\\s+)?to)\\s+(?:the\\s+)?(?:redis\\s+)?(?:command\\s+)?(?:`KEYS`|\\bKEYS\\s*\\*)" +
+
+	// a positive predicate about it: "KEYS * is fine", "`KEYS` is simplest"
+
+	"|(?:^|[^A-Za-z0-9_-])(?:`KEYS`|\\bKEYS\\s*\\*)[^.;\\n]{0,30}?\\b(?:is|are|was|were|seems?|looks?|works?|stays?|remains?|would\\s+be|should\\s+be)\\s+(?:a\\s+|just\\s+|totally\\s+|still\\s+|actually\\s+)?(?:fine|good|great|safe|ok|okay|acceptable|simplest|easiest|better|fast\\s+enough)" +
+
+	// a bare command line after a colon or full stop: "run this:\\nKEYS *" -
+
+	// requiring the break keeps a line-initial mention that merely
+
+	// continues a wrapped sentence from triggering.
+
+	"|(?:[.:]|^)[ \\t]*(?:\\r?\\n)[ \\t*`>-]*(?:`KEYS`|\\bKEYS\\s*\\*)" +
+
+	")")
 
 // dbNegationWindow is how many characters around a KEYS-command mention
 // are searched for a negation cue.
 const dbNegationWindow = 60
 
-// dbNoBareKeysInProd scores full credit unless the response instructs
-// running "KEYS *" against a production instance without any negating
-// context (a warning not to, or an instruction to use SCAN instead is
-// fine). This is deliberately not eval.NotContains, which would also zero
-// out the best possible answer: one that correctly explains why NOT to run
-// KEYS in production.
+// dbNoBareKeysInProd scores full credit unless the response endorses
+// running "KEYS *" against a production instance (see
+// dbKeysEndorsementPattern) with no negating context nearby — a warning
+// not to, or an instruction to use SCAN instead, is fine. This is
+// deliberately not eval.NotContains, which would also zero out the best
+// possible answer: one that correctly explains why NOT to run KEYS in
+// production.
 //
 // Delegates to eval.NoUnnegatedMention (D5), the primitive shared with
 // kubernetes.go, security.go, and delivery_git.go's equivalent guards.
 func dbNoBareKeysInProd() eval.Evaluator {
-	return eval.NoUnnegatedMention(dbKeysCommandPattern, dbNegationWindow, nil)
+	return eval.NoUnnegatedMention(dbKeysEndorsementPattern, dbNegationWindow, nil)
 }
 
 // dbRedisScanVsKeysTest: require SCAN over KEYS for a hot-path production

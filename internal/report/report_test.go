@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
+	"github.com/lukaszraczylo/llm-testbench/internal/llm"
 	"github.com/lukaszraczylo/llm-testbench/internal/runner"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
@@ -30,6 +31,47 @@ func sampleResults() []runner.Result {
 		{Model: "m2", TestID: "go-1", Score: eval.Score{Value: 0}, Latency: 50 * time.Millisecond, PromptTokens: 3, CompletionTokens: 2},
 		{Model: "m2", TestID: "py-1", Score: eval.Score{Skipped: true, Detail: "toolchain missing: cc"}},
 		{Model: "m2", TestID: "k8s-1", Score: eval.Score{Value: 1}, Latency: 150 * time.Millisecond, PromptTokens: 9, CompletionTokens: 6},
+	}
+}
+
+// Truncation policy: attempts cut off by the token budget are excluded
+// from a cell's mean when any attempt finished normally; the cell is still
+// flagged "!" so the discarded sample is visible. When every scored
+// attempt was truncated, the mean falls back to the partial-text scores.
+func TestIndexResults_TruncatedAttemptExcludedFromMean(t *testing.T) {
+	idx := indexResults([]runner.Result{
+		{Model: "m1", TestID: "t", Attempt: 0, Score: eval.Score{Value: 1}, PromptTokens: 4},
+		{Model: "m1", TestID: "t", Attempt: 1, Score: eval.Score{Value: 0}, FinishReason: llm.FinishReasonLength, PromptTokens: 100},
+	})
+	c := idx["t"]["m1"]
+	if got := c.result.Score.Value; got != 1 {
+		t.Errorf("mean = %v, want 1 (clean attempts only)", got)
+	}
+	if !c.result.Truncated() {
+		t.Error("cell should be flagged truncated")
+	}
+	if c.minScore != 1 || c.maxScore != 1 {
+		t.Errorf("min/max = %v/%v, want 1/1 (truncated attempt excluded from instability range)", c.minScore, c.maxScore)
+	}
+	if got := int(c.meanTokens); got != 4 {
+		t.Errorf("meanTokens = %d, want 4 (clean attempts only)", got)
+	}
+}
+
+func TestIndexResults_AllAttemptsTruncatedFallBackToPartialScores(t *testing.T) {
+	idx := indexResults([]runner.Result{
+		{Model: "m1", TestID: "t", Attempt: 0, Score: eval.Score{Value: 0.4}, FinishReason: llm.FinishReasonLength, PromptTokens: 10},
+		{Model: "m1", TestID: "t", Attempt: 1, Score: eval.Score{Value: 0.6}, FinishReason: llm.FinishReasonLength, PromptTokens: 20},
+	})
+	c := idx["t"]["m1"]
+	if got := c.result.Score.Value; math.Abs(got-0.5) > 1e-9 {
+		t.Errorf("mean = %v, want 0.5 (fallback over all-truncated attempts)", got)
+	}
+	if !c.result.Truncated() {
+		t.Error("cell should be flagged truncated")
+	}
+	if c.scored != 2 {
+		t.Errorf("scored = %d, want 2", c.scored)
 	}
 }
 
@@ -85,10 +127,11 @@ func TestRenderJSON_DumpsRawResults(t *testing.T) {
 		t.Fatalf("Render() error = %v", err)
 	}
 
-	var out []jsonResult
-	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+	var doc jsonArtifact
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v; output:\n%s", err, buf.String())
 	}
+	out := doc.Results
 	if len(out) != len(sampleResults()) {
 		t.Fatalf("len(out) = %d, want %d", len(out), len(sampleResults()))
 	}
@@ -173,14 +216,14 @@ func TestRenderJSON_IncludesResponseTextFinishReasonAndTruncated(t *testing.T) {
 		t.Fatalf("Render() error = %v", err)
 	}
 
-	var out []jsonResult
-	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+	var doc jsonArtifact
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v; output:\n%s", err, buf.String())
 	}
-	if len(out) != 1 {
-		t.Fatalf("len(out) = %d, want 1", len(out))
+	if len(doc.Results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(doc.Results))
 	}
-	got := out[0]
+	got := doc.Results[0]
 	if got.ResponseText != "partial answer" {
 		t.Errorf("ResponseText = %q, want %q", got.ResponseText, "partial answer")
 	}
@@ -211,7 +254,7 @@ func TestSummarize_Buckets(t *testing.T) {
 		{Model: "m1", TestID: "d", Err: errors.New("fail")},
 		{Model: "m1", TestID: "e", Score: eval.Score{Skipped: true}},
 	}
-	summaries := summarize([]string{"m1"}, results)
+	summaries := summarize([]string{"m1"}, indexResults(results))
 	if len(summaries) != 1 {
 		t.Fatalf("summarize() len = %d, want 1", len(summaries))
 	}
@@ -236,7 +279,7 @@ func TestSummarize_AvgTokPerSec(t *testing.T) {
 		{Model: "m1", TestID: "err", Err: errors.New("fail"), Latency: time.Second, CompletionTokens: 999},
 		{Model: "m1", TestID: "skipped", Score: eval.Score{Skipped: true}, Latency: time.Second, CompletionTokens: 999},
 	}
-	summaries := summarize([]string{"m1"}, results)
+	summaries := summarize([]string{"m1"}, indexResults(results))
 	ms := summaries[0]
 
 	want := 110.0 / 2.1
@@ -250,7 +293,7 @@ func TestSummarize_AvgTokPerSec_NoDataIsNaN(t *testing.T) {
 		{Model: "m1", TestID: "err", Err: errors.New("fail")},
 		{Model: "m1", TestID: "skipped", Score: eval.Score{Skipped: true}},
 	}
-	summaries := summarize([]string{"m1"}, results)
+	summaries := summarize([]string{"m1"}, indexResults(results))
 	if !math.IsNaN(summaries[0].avgTokPerSec) {
 		t.Errorf("avgTokPerSec = %v, want NaN when there is no timed data", summaries[0].avgTokPerSec)
 	}

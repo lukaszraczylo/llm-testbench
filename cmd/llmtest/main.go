@@ -14,6 +14,7 @@ import (
 	"github.com/lukaszraczylo/llm-testbench/internal/llm"
 	"github.com/lukaszraczylo/llm-testbench/internal/report"
 	"github.com/lukaszraczylo/llm-testbench/internal/runner"
+	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 	"github.com/lukaszraczylo/llm-testbench/internal/tests"
 )
 
@@ -37,9 +38,12 @@ func main() {
 		err = runCommand(os.Args[2:])
 	case "list":
 		err = listCommand(os.Args[2:])
+	case "compare":
+		err = compareCommand(os.Args[2:])
+	case "health":
+		err = healthCommand(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("llmtest " + version)
-		return
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -59,9 +63,16 @@ func usage() {
 	fmt.Fprint(os.Stderr, `llmtest - LLM accuracy testing framework
 
 Usage:
-  llmtest run  [flags]   Run the test catalog against configured models.
-  llmtest list [flags]   List the test catalog.
-  llmtest version        Print the build version.
+  llmtest run     [flags]   Run the test catalog against configured models.
+  llmtest list    [flags]   List the test catalog.
+  llmtest compare baseline.json current.json
+                            Diff two saved run artifacts (--out files).
+  llmtest health  file.json [more.json ...]
+                            Audit suite health: which subcategories are
+                            saturated (every model passes everything), and
+                            which tests still carry signal. Pools multiple
+                            artifacts.
+  llmtest version           Print the build version.
 
 Run "llmtest run -h" or "llmtest list -h" for flag details.
 `)
@@ -103,9 +114,12 @@ func runCommand(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	shared := bindSharedFlags(fs)
 	modelsCSV := fs.String("models", "", "comma-separated model override (defaults to config's models)")
+	testsCSV := fs.String("tests", "", "comma-separated exact test IDs (overrides --category/--subcategory)")
 	format := fs.String("format", "table", "output format: table|markdown|json")
 	concurrency := fs.Int("concurrency", 0, "override config's concurrency (0 = use config)")
 	timeout := fs.Duration("timeout", 0, "override config's request_timeout (0 = use config)")
+	repeat := fs.Int("repeat", 1, "samples per (model, test); >1 exposes response instability at temperature 0")
+	out := fs.String("out", "", "write the run as a JSON artifact to this file (for llmtest compare)")
 	quiet := fs.Bool("quiet", false, "suppress progress output on stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -134,9 +148,9 @@ func runCommand(args []string) error {
 	client := llm.NewOpenAIClient(cfg.Endpoint, cfg.APIKey, reqTimeout)
 
 	registry := tests.All()
-	selected := registry.Filter(shared.category, shared.subcategory)
-	if len(selected) == 0 {
-		return fmt.Errorf("no tests matched category=%q subcategory=%q", shared.category, shared.subcategory)
+	selected, err := selectTests(registry, *testsCSV, shared.category, shared.subcategory)
+	if err != nil {
+		return err
 	}
 
 	var reporter runner.ProgressReporter = runner.NoopProgressReporter{}
@@ -149,6 +163,7 @@ func runCommand(args []string) error {
 		Temperature:      requestTemperature,
 		MaxTokensDefault: cfg.MaxTokensDefault,
 		Reporter:         reporter,
+		Repeat:           *repeat,
 	})
 
 	ctx := context.Background()
@@ -159,7 +174,88 @@ func runCommand(args []string) error {
 		return err
 	}
 
+	if *out != "" {
+		if err := report.WriteArtifact(*out, selected, models, results); err != nil {
+			return fmt.Errorf("write --out: %w", err)
+		}
+	}
+
 	return report.Render(os.Stdout, f, selected, models, results)
+}
+
+// selectTests resolves the test subset: --tests (exact IDs, error on any
+// unknown ID) overrides --category/--subcategory filtering.
+func selectTests(registry *testkit.Registry, testsCSV, category, subcategory string) ([]testkit.Test, error) {
+	if testsCSV == "" {
+		selected := registry.Filter(category, subcategory)
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("no tests matched category=%q subcategory=%q", category, subcategory)
+		}
+		return selected, nil
+	}
+
+	ids := splitCSV(testsCSV)
+	out := make([]testkit.Test, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		t, ok := registry.Get(id)
+		if !ok {
+			return nil, fmt.Errorf("unknown test id %q (see llmtest list)", id)
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("--tests parsed to zero ids")
+	}
+	return out, nil
+}
+
+// compareCommand diffs two saved artifacts from `llmtest run --out`.
+func compareCommand(args []string) error {
+	fs := flag.NewFlagSet("compare", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: llmtest compare baseline.json current.json")
+	}
+
+	baseline, err := report.LoadArtifact(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	current, err := report.LoadArtifact(fs.Arg(1))
+	if err != nil {
+		return err
+	}
+
+	return report.RenderCompare(os.Stdout, report.CompareArtifacts(baseline, current))
+}
+
+// healthCommand audits one or more saved artifacts for suite health:
+// per-subcategory saturation and the tests that still discriminate.
+func healthCommand(args []string) error {
+	fs := flag.NewFlagSet("health", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: llmtest health artifact.json [more.json ...]")
+	}
+	artifacts := make([]report.Artifact, 0, fs.NArg())
+	for _, p := range fs.Args() {
+		a, err := report.LoadArtifact(p)
+		if err != nil {
+			return fmt.Errorf("load %s: %w", p, err)
+		}
+		artifacts = append(artifacts, a)
+	}
+	return report.RenderHealth(os.Stdout, report.AuditHealth(artifacts))
 }
 
 // validateFormat parses and validates the --format flag value, pulled out

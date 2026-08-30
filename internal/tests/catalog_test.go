@@ -64,8 +64,8 @@ func TestAll_SubcategoryMinimums(t *testing.T) {
 	const minTestsPerSubcategory = 10
 
 	wantSubcats := map[string][]string{
-		"programming": {"golang", "python", "typescript", "c"},
-		"operations":  {"macos", "linux", "kubernetes"},
+		"programming": {"golang", "python", "typescript", "c", "hard"},
+		"operations":  {"macos", "linux", "kubernetes", "scenario"},
 		"research":    {"web", "whitepapers", "codebase"},
 		"agents":      {"tool-routing", "planning", "delegation"},
 		"databases":   {"postgres", "redis", "sql-tuning"},

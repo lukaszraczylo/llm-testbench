@@ -29,6 +29,20 @@ func TestSecPasswordHashChoiceTest_Eval(t *testing.T) {
 			want:     1,
 		},
 		{
+			// Regression from the live probe (2026-08-29): a fully correct
+			// answer names the discouraged hashes as bullets under a negated
+			// heading ("Do **not** use ... including:"). The heading ends in
+			// ":" - not a clause boundary - so its cue must reach every bullet.
+			name: "correct probe answer: discouraged hashes as bullets under a negated heading",
+			response: "Use Argon2id (or bcrypt with cost >= 12) to store passwords.\n\n" +
+				"Do **not** use fast general-purpose cryptographic hashes for storing passwords, including:\n" +
+				"- **MD5**\n" +
+				"- **SHA-1**\n" +
+				"- **SHA-256**\n" +
+				"- **SHA-512**",
+			want: 1,
+		},
+		{
 			name:     "wrong: recommends SHA-256 unnegated",
 			response: "Just hash the password with SHA-256 before storing it.",
 			want:     0,

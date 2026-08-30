@@ -23,29 +23,49 @@ func registerSecurityCryptoTests(r *testkit.Registry) {
 	r.Register(secHashVsEncryptPIITest())
 }
 
-// secWeakPasswordHashPattern matches a mention of a fast, general-purpose
-// hash (MD5, plain SHA-1/256/512) - the ones that must never be used
-// directly for password storage because they lack a tunable work factor.
-var secWeakPasswordHashPattern = regexp.MustCompile(`(?i)\b(md5|sha-?1|sha-?256|sha-?512)\b`)
+// secWeakHashEndorsementPattern matches a weak-hash mention in an
+// endorsement-shaped position — a verb recommending it ("hash with MD5",
+// "just hash the password with SHA-256"), or a positive predicate about it
+// ("SHA-256 is a fine choice") — rather than every mention. The guard then
+// still requires a negation cue near such a mention (see
+// secNoUnnegatedMention).
+//
+// Triggering on any mention is too strict: a fully correct live answer
+// (probe, 2026-08-29) lists the discouraged hashes as bare bullets under a
+// negated heading ("Do **not** use fast general-purpose ... including:") —
+// the cue sits on the heading, but the negation window stops at the line
+// break and the heading is more than a window-width away, so each bullet
+// read as an unnegated endorsement and cost the model half the score.
+// A bare bullet names, it does not recommend — the predicate branch still
+// catches an endorsed bullet ("- **MD5** is fine for passwords").
+var secWeakHashEndorsementPattern = regexp.MustCompile("(?i)(?:" +
+	// a verb recommending it: "hash with MD5", "store passwords hashed with
+	// MD5", "just hash the password with SHA-256" — the filler loop only
+	// bridges recommendation boilerplate, never another algorithm name, so
+	// "prefer argon2 over md5" (a correct answer) is not an endorsement.
+	"(?:hash(?:es|ed|ing)?|store|stores|stored|crypt|encrypt|use|using|used|recommend|recommends|prefer|prefers|should(?:\\s+(?:also|just))?|want)" +
+	"\\s+(?:(?:it|its|the|a|an|password|passwords|user|users|hash|hashed|with|using|as|via|by|plain|raw|fast|for|directly|simply|just|them|to)[ \\t]*\\n?[ \\t]*(?:-[ \\t]*)?){0,6}(?:md5|sha-?1|sha-?256|sha-?512)" +
+	`|(?:^|[^A-Za-z0-9_-])(?:md5|sha-?1|sha-?256|sha-?512)[^.;\n]{0,25}?\b(?:is|are|was|were|seems?|looks?|works?|would\s+be|should\s+be)\s+(?:a\s+|just\s+|still\s+|totally\s+|actually\s+)?(?:fine|good|great|safe|ok|okay|acceptable|perfect|sufficient|enough|best|better|the\s+(?:right|best)\s+choice)` +
+	")")
 
 // secWeakHashNamedAndNegated scores full credit only when the response BOTH
-// safely negates every mention of a weak/fast general-purpose hash (or
-// never mentions one) AND actually names at least one of them by name
-// (md5/sha-1/sha-256/sha-512) - C11's fix folded into a single AND rather
-// than an independent extra ContainsAny term, so a wrong answer that
+// avoids endorsing any weak/fast general-purpose hash with no nearby
+// negation (or never mentions one) AND actually names at least one of them
+// by name (md5/sha-1/sha-256/sha-512) - C11's fix folded into a single AND
+// rather than an independent extra ContainsAny term, so a wrong answer that
 // recommends SHA-256 outright cannot earn partial credit merely for having
 // typed "SHA-256" while doing so.
 func secWeakHashNamedAndNegated() eval.Evaluator {
 	named := eval.ContainsAny("md5", "sha-1", "sha1", "sha-256", "sha256")
-	negated := secNoUnnegatedMention(secWeakPasswordHashPattern)
+	negated := secNoUnnegatedMention(secWeakHashEndorsementPattern)
 	return eval.EvaluatorFunc(func(ctx context.Context, response string) eval.Score {
 		if n := negated.Evaluate(ctx, response); n.Value != 1 {
-			return eval.Score{Value: 0, Detail: "unnegated mention of a discouraged hash: " + n.Detail}
+			return eval.Score{Value: 0, Detail: "endorses a discouraged hash without negating it: " + n.Detail}
 		}
 		if m := named.Evaluate(ctx, response); m.Value != 1 {
 			return eval.Score{Value: 0, Detail: "never names a weak hash by name"}
 		}
-		return eval.Score{Value: 1, Detail: "a weak hash is named and every mention is safely negated"}
+		return eval.Score{Value: 1, Detail: "a weak hash is named and none is endorsed without negation"}
 	})
 }
 
