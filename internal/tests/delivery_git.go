@@ -46,7 +46,7 @@ func delNoUnnegatedMention(forbidden *regexp.Regexp) eval.Evaluator {
 // "-with-lease" - the safe form, exempt from the bare-force check entirely
 // rather than needing a negation cue.
 var delForceFlagPattern = regexp.MustCompile(`(?i)--force\b`)
-var delForceWithLeaseSuffixPattern = regexp.MustCompile(`(?i)^-with-lease`)
+var delForceWithLeaseSuffixPattern = regexp.MustCompile(`(?i)^-(with-lease|if-includes)`)
 
 // delNoBareForcePush scores full credit unless the response recommends a
 // bare "--force" push (not "--force-with-lease") with no negation cue
@@ -320,8 +320,10 @@ func delGitDetachedHeadRecoveryTest() testkit.Test {
 branch name), then made 3 new commits while HEAD was detached. You only now
 realize you need to keep that work, and HEAD is still detached. Give the
 ordered list of git subcommands (just the subcommand names, e.g. "branch")
-you must run, in order, to save the 3 commits onto a new branch without
-losing them. Respond with only a JSON array of subcommand names, e.g.
+you must run, in order, to save the 3 commits onto a new branch AND end up
+checked out on that branch, with HEAD attached to it (a bare "git branch"
+alone saves the commits but leaves HEAD detached, which is not enough
+here). Respond with only a JSON array of subcommand names, e.g.
 ["a","b"].`
 
 	return testkit.Test{

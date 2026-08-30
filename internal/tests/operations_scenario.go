@@ -178,9 +178,10 @@ D) kubectl scale deployment ingestion --replicas=0
 E) ssh to a node and run journalctl -u kubelet
 
 Respond with only a JSON array of the step letters that make up your
-diagnosis, containing exactly the diagnostic steps you would take to find
-the root cause (any order) - do not include steps that only act without
-diagnosing.`
+diagnosis, containing exactly the SMALLEST set of steps sufficient to find
+the root cause (any order). Do not include steps that only act without
+diagnosing, and do not include diagnostics that are redundant when a
+simpler kubectl call already surfaces the same information.`
 
 	return testkit.Test{
 		ID:          "scen-crashloop-order",
