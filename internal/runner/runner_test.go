@@ -410,3 +410,89 @@ func TestRunner_Run_RepeatSamplesEachCombination(t *testing.T) {
 		}
 	}
 }
+
+func TestRunner_Run_PassesSeedAndRecordsFingerprint(t *testing.T) {
+	var gotSeed *int
+	client := &mockClient{respond: func(req llm.Request) (llm.Response, error) {
+		gotSeed = req.Seed
+		return llm.Response{Text: "OK", Fingerprint: "fp-1", ServedModel: "served"}, nil
+	}}
+	seed := 7
+	r := New(client, Config{Concurrency: 1, MaxTokensDefault: 100, Seed: &seed})
+	res := r.Run(context.Background(), []string{"m"}, []testkit.Test{{ID: "t", Category: "c", Prompt: "p", Eval: echoEval()}})
+	if gotSeed == nil || *gotSeed != 7 {
+		t.Errorf("request seed = %v, want 7", gotSeed)
+	}
+	if res[0].Fingerprint != "fp-1" || res[0].ServedModel != "served" {
+		t.Errorf("fingerprint/model = %q/%q, want fp-1/served", res[0].Fingerprint, res[0].ServedModel)
+	}
+}
+
+func TestRunner_Run_EvaluatorPanicBecomesErrorResult(t *testing.T) {
+	boom := eval.EvaluatorFunc(func(context.Context, string) eval.Score { panic("boom") })
+	r := New(&mockClient{}, Config{Concurrency: 2, MaxTokensDefault: 100})
+	res := r.Run(context.Background(), []string{"m"}, []testkit.Test{
+		{ID: "bad", Category: "c", Prompt: "p", Eval: boom},
+		{ID: "good", Category: "c", Prompt: "p", Eval: echoEval()},
+	})
+	if res[0].Err == nil || !strings.Contains(res[0].Err.Error(), "boom") {
+		t.Errorf("panicking test Err = %v, want panic error", res[0].Err)
+	}
+	if res[1].Err != nil || res[1].Score.Value != 1 {
+		t.Errorf("sibling test = %+v, want unaffected pass", res[1])
+	}
+}
+
+func TestRunner_Run_CancelledContextSkipsCalls(t *testing.T) {
+	var calls int32
+	client := &mockClient{respond: func(llm.Request) (llm.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return llm.Response{Text: "OK"}, nil
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := New(client, Config{Concurrency: 2, MaxTokensDefault: 100})
+	res := r.Run(ctx, []string{"m"}, []testkit.Test{{ID: "t", Category: "c", Prompt: "p", Eval: echoEval()}})
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Errorf("client called %d times after cancel, want 0", calls)
+	}
+	if !errors.Is(res[0].Err, context.Canceled) {
+		t.Errorf("Err = %v, want context.Canceled", res[0].Err)
+	}
+}
+
+func TestRunner_Run_ModelConcurrencyCapDoesNotStarveOthers(t *testing.T) {
+	var slowIn, slowMax int32
+	fastDone := make(chan struct{}, 8)
+	client := &mockClient{respond: func(req llm.Request) (llm.Response, error) {
+		if req.Model == "slow" {
+			cur := atomic.AddInt32(&slowIn, 1)
+			for {
+				m := atomic.LoadInt32(&slowMax)
+				if cur <= m || atomic.CompareAndSwapInt32(&slowMax, m, cur) {
+					break
+				}
+			}
+			time.Sleep(30 * time.Millisecond)
+			atomic.AddInt32(&slowIn, -1)
+		} else {
+			fastDone <- struct{}{}
+		}
+		return llm.Response{Text: "OK"}, nil
+	}}
+	r := New(client, Config{Concurrency: 2, MaxTokensDefault: 100, ModelConcurrency: map[string]int{"slow": 1}})
+	tests := make([]testkit.Test, 6)
+	for i := range tests {
+		tests[i] = testkit.Test{ID: string(rune('a' + i)), Category: "c", Prompt: "p", Eval: echoEval()}
+	}
+	res := r.Run(context.Background(), []string{"slow", "fast"}, tests)
+	if len(res) != 12 {
+		t.Fatalf("results = %d, want 12", len(res))
+	}
+	if got := atomic.LoadInt32(&slowMax); got != 1 {
+		t.Errorf("slow model max in-flight = %d, want 1", got)
+	}
+	if len(fastDone) != 6 {
+		t.Errorf("fast calls = %d, want 6", len(fastDone))
+	}
+}

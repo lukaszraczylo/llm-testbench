@@ -5,6 +5,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -59,6 +60,8 @@ type Result struct {
 	TestID           string
 	ResponseText     string
 	FinishReason     string
+	Fingerprint      string
+	ServedModel      string
 	Score            eval.Score
 	Latency          time.Duration
 	PromptTokens     int
@@ -83,7 +86,13 @@ func (r Result) TotalTokens() int {
 
 // Config controls how the Runner fans work out.
 type Config struct {
-	Reporter         ProgressReporter
+	Reporter ProgressReporter
+	// Seed, when non-nil, is sent with every request for backends that
+	// honor it.
+	Seed *int
+	// ModelConcurrency caps in-flight calls per model (on top of the global
+	// Concurrency), so one slow local model is not flooded into timeouts.
+	ModelConcurrency map[string]int
 	Concurrency      int
 	Temperature      float64
 	MaxTokensDefault int
@@ -138,15 +147,32 @@ func (r *Runner) Run(ctx context.Context, models []string, tests []testkit.Test)
 	if concurrency <= 0 {
 		concurrency = 1
 	}
-	g.SetLimit(concurrency)
+	// Jobs wait for their per-model slot first, then a global slot, so a
+	// capped slow model's queue never occupies global slots other models
+	// need.
+	global := make(chan struct{}, concurrency)
 
 	r.cfg.Reporter.ReportStart(len(tests), len(models), concurrency)
 
 	var completed int32
 	// go.mod's go directive is 1.22+, so loop variables are already
 	// per-iteration scoped; no manual i, j := i, j shadowing needed (N4).
+	sems := make(map[string]chan struct{}, len(r.cfg.ModelConcurrency))
+	for m, n := range r.cfg.ModelConcurrency {
+		if n > 0 {
+			sems[m] = make(chan struct{}, n)
+		}
+	}
 	for i, j := range jobs {
 		g.Go(func() error {
+			if sem, ok := sems[j.model]; ok {
+				if acquire(gctx, sem) {
+					defer func() { <-sem }()
+				}
+			}
+			if acquire(gctx, global) {
+				defer func() { <-global }()
+			}
 			res := r.runOne(gctx, j.model, j.test)
 			res.Attempt = j.attempt
 			results[i] = res
@@ -167,8 +193,32 @@ func (r *Runner) Run(ctx context.Context, models []string, tests []testkit.Test)
 	return results
 }
 
-// runOne executes a single (model, test) combination.
-func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) Result {
+// acquire takes a slot from sem, reporting false if ctx ended first.
+func acquire(ctx context.Context, sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// runOne executes a single (model, test) combination. A cancelled context
+// short-circuits to an error result, and a panic in an evaluator becomes an
+// error result instead of killing a multi-hour run.
+func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) (res Result) {
+	if err := ctx.Err(); err != nil {
+		return Result{Model: model, TestID: test.ID, Err: err}
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			res = Result{Model: model, TestID: test.ID, Err: fmt.Errorf("runner: panic scoring test: %v", p)}
+		}
+	}()
+	return r.execute(ctx, model, test)
+}
+
+func (r *Runner) execute(ctx context.Context, model string, test testkit.Test) Result {
 	// cfg.MaxTokensDefault is a floor, not a fallback used only when the
 	// test leaves MaxTokens unset: a per-test value only ever raises the
 	// budget, it never lowers it below the default. A reasoning model can
@@ -190,6 +240,7 @@ func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) Re
 		Tools:       test.Tools,
 		MaxTokens:   maxTokens,
 		Temperature: r.cfg.Temperature,
+		Seed:        r.cfg.Seed,
 	}
 
 	// Wall-clock across all attempts, recorded even on error: an error row
@@ -223,6 +274,8 @@ func (r *Runner) runOne(ctx context.Context, model string, test testkit.Test) Re
 		Score:            score,
 		ResponseText:     scored,
 		FinishReason:     resp.FinishReason,
+		Fingerprint:      resp.Fingerprint,
+		ServedModel:      resp.ServedModel,
 		Latency:          resp.Latency,
 		PromptTokens:     resp.PromptTokens,
 		CompletionTokens: resp.CompletionTokens,

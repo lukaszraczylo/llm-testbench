@@ -4,11 +4,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/config"
 	"github.com/lukaszraczylo/llm-testbench/internal/llm"
@@ -121,6 +125,7 @@ func runCommand(args []string) error {
 	repeat := fs.Int("repeat", 1, "samples per (model, test); >1 exposes response instability at temperature 0")
 	out := fs.String("out", "", "write the run as a JSON artifact to this file (for llmtest compare)")
 	quiet := fs.Bool("quiet", false, "suppress progress output on stderr")
+	seedFlag := fs.Int("seed", 0, "send this seed with every request (overrides config's seed)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -132,7 +137,7 @@ func runCommand(args []string) error {
 
 	models := cfg.Models
 	if *modelsCSV != "" {
-		models = splitCSV(*modelsCSV)
+		models = dedupe(splitCSV(*modelsCSV))
 	}
 
 	reqTimeout := cfg.RequestTimeout
@@ -145,7 +150,18 @@ func runCommand(args []string) error {
 		conc = *concurrency
 	}
 
-	client := llm.NewOpenAIClient(cfg.Endpoint, cfg.APIKey, reqTimeout)
+	seed := cfg.Seed
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "seed" {
+			seed = seedFlag
+		}
+	})
+
+	client := llm.NewOpenAIClient(cfg.Endpoint, cfg.APIKey, reqTimeout).
+		WithRetries(cfg.MaxRetries).
+		WithRetryTimeouts(cfg.RetryTimeouts).
+		WithModelTimeouts(cfg.ModelTimeouts).
+		WithStreaming(cfg.Stream, cfg.IdleTimeout)
 
 	registry := tests.All()
 	selected, err := selectTests(registry, *testsCSV, shared.category, shared.subcategory)
@@ -164,10 +180,23 @@ func runCommand(args []string) error {
 		MaxTokensDefault: cfg.MaxTokensDefault,
 		Reporter:         reporter,
 		Repeat:           *repeat,
+		Seed:             seed,
+		ModelConcurrency: cfg.ModelConcurrency,
 	})
 
-	ctx := context.Background()
+	// First Ctrl-C stops dispatching and lets in-flight calls drain so the
+	// partial run can still be saved; stop() restores default handling, so
+	// a second Ctrl-C kills the process.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	startedAt := time.Now().UTC()
 	results := r.Run(ctx, models, selected)
+	interrupted := ctx.Err() != nil
+	if interrupted {
+		stop()
+		results = dropCancelled(results)
+		fmt.Fprintf(os.Stderr, "llmtest: interrupted; reporting %d completed results\n", len(results))
+	}
 
 	f, err := validateFormat(*format)
 	if err != nil {
@@ -175,12 +204,35 @@ func runCommand(args []string) error {
 	}
 
 	if *out != "" {
-		if err := report.WriteArtifact(*out, selected, models, results); err != nil {
+		meta := report.RunMeta{
+			Version:          version,
+			StartedAt:        startedAt.Format(time.RFC3339),
+			Endpoint:         cfg.Endpoint,
+			Seed:             seed,
+			Temperature:      requestTemperature,
+			MaxTokensDefault: cfg.MaxTokensDefault,
+			Repeat:           max(*repeat, 1),
+			Interrupted:      interrupted,
+		}
+		if err := report.WriteArtifact(*out, meta, selected, models, results); err != nil {
 			return fmt.Errorf("write --out: %w", err)
 		}
 	}
 
 	return report.Render(os.Stdout, f, selected, models, results)
+}
+
+// dropCancelled removes results that never ran because the run was
+// interrupted, so they are not saved as failures.
+func dropCancelled(results []runner.Result) []runner.Result {
+	kept := results[:0:0]
+	for _, r := range results {
+		if r.Err != nil && errors.Is(r.Err, context.Canceled) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept
 }
 
 // selectTests resolves the test subset: --tests (exact IDs, error on any
@@ -234,7 +286,7 @@ func compareCommand(args []string) error {
 		return err
 	}
 
-	return report.RenderCompare(os.Stdout, report.CompareArtifacts(baseline, current))
+	return report.RenderCompare(os.Stdout, report.CompareArtifacts(baseline, current), report.CompareWarnings(baseline, current)...)
 }
 
 // healthCommand audits one or more saved artifacts for suite health:
@@ -269,6 +321,20 @@ func validateFormat(format string) (report.Format, error) {
 	default:
 		return "", fmt.Errorf("unknown format %q (want table|markdown|json)", format)
 	}
+}
+
+// dedupe drops repeated entries, keeping first-seen order; a model listed
+// twice would otherwise run, and be averaged, twice.
+func dedupe(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func splitCSV(s string) []string {

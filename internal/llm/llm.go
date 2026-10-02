@@ -37,6 +37,7 @@ type ToolCall struct {
 // non-empty the client advertises them with tool_choice "auto", so the
 // model decides whether and which to call.
 type Request struct {
+	Seed        *int
 	Model       string
 	Messages    []Message
 	Tools       []Tool
@@ -48,6 +49,8 @@ type Request struct {
 type Response struct {
 	Text             string
 	FinishReason     string
+	Fingerprint      string
+	ServedModel      string
 	ToolCalls        []ToolCall
 	PromptTokens     int
 	CompletionTokens int

@@ -170,8 +170,11 @@ func CompareArtifacts(baseline, current Artifact) []Comparison {
 
 // RenderCompare writes a comparison report: headline counts, then only
 // changed/missing rows (stable rows are summarized, not listed).
-func RenderCompare(w io.Writer, comparisons []Comparison) error {
+func RenderCompare(w io.Writer, comparisons []Comparison, warnings ...string) error {
 	ew := &errWriter{w: w}
+	for _, warn := range warnings {
+		ew.println("WARNING: " + warn)
+	}
 
 	var reg, imp, stable, added, removed, errored int
 	for _, c := range comparisons {
@@ -218,4 +221,10 @@ func deltaText(v float64) string {
 		return "N/A"
 	}
 	return fmt.Sprintf("%+.2f", v)
+}
+
+// CompareWarnings reports reasons the two artifacts may not be comparable
+// like-for-like (catalog, sampling or backend-build drift).
+func CompareWarnings(baseline, current Artifact) []string {
+	return compareWarnings(baseline.Meta, current.Meta)
 }

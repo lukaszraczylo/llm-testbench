@@ -160,6 +160,9 @@ func TestValidate(t *testing.T) {
 		{name: "zero concurrency", mutate: func(c Config) Config { c.Concurrency = 0; return c }},
 		{name: "negative concurrency", mutate: func(c Config) Config { c.Concurrency = -1; return c }},
 		{name: "zero timeout", mutate: func(c Config) Config { c.RequestTimeout = 0; return c }},
+		{name: "non-http endpoint", mutate: func(c Config) Config { c.Endpoint = "llm-gateway.example.com/v1"; return c }},
+		{name: "duplicate model", mutate: func(c Config) Config { c.Models = []string{"m", "m"}; return c }},
+		{name: "negative retries", mutate: func(c Config) Config { c.MaxRetries = -1; return c }},
 		{name: "zero max tokens", mutate: func(c Config) Config { c.MaxTokensDefault = 0; return c }},
 	}
 	for _, tt := range tests {
@@ -192,5 +195,67 @@ func TestLoad_MissingFile(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	if err == nil {
 		t.Fatal("Load() error = nil, want error for missing file")
+	}
+}
+
+func TestParse_RetriesAndSeed(t *testing.T) {
+	base := "endpoint: https://x\nmodels: [m]\n"
+
+	cfg, err := parse([]byte(base))
+	if err != nil {
+		t.Fatalf("parse() error = %v", err)
+	}
+	if cfg.MaxRetries != defaultMaxRetries || cfg.Seed != nil {
+		t.Errorf("defaults = retries %d seed %v, want %d nil", cfg.MaxRetries, cfg.Seed, defaultMaxRetries)
+	}
+
+	cfg, err = parse([]byte(base + "max_retries: 0\nseed: 7\n"))
+	if err != nil {
+		t.Fatalf("parse() error = %v", err)
+	}
+	if cfg.MaxRetries != 0 {
+		t.Errorf("explicit max_retries 0 = %d, want 0 (retrying disabled)", cfg.MaxRetries)
+	}
+	if cfg.Seed == nil || *cfg.Seed != 7 {
+		t.Errorf("Seed = %v, want 7", cfg.Seed)
+	}
+}
+
+func TestParse_ModelOverrides(t *testing.T) {
+	cfg, err := parse([]byte(`
+endpoint: https://x
+models: [a, b]
+retry_timeouts: false
+model_timeouts: {a: 45m}
+model_concurrency: {a: 1}
+`))
+	if err != nil {
+		t.Fatalf("parse() error = %v", err)
+	}
+	if cfg.RetryTimeouts || cfg.ModelTimeouts["a"] != 45*time.Minute || cfg.ModelConcurrency["a"] != 1 {
+		t.Errorf("got %+v", cfg)
+	}
+	def, _ := parse([]byte("endpoint: https://x\nmodels: [a]\n"))
+	if !def.RetryTimeouts {
+		t.Error("retry_timeouts default = false, want true (legacy behavior)")
+	}
+	for _, bad := range []string{"model_timeouts: {a: nope}", "model_timeouts: {a: 0s}", "model_concurrency: {a: 0}"} {
+		if _, err := parse([]byte("endpoint: https://x\nmodels: [a]\n" + bad)); err == nil {
+			t.Errorf("parse(%q) error = nil, want error", bad)
+		}
+	}
+}
+
+func TestParse_Streaming(t *testing.T) {
+	cfg, err := parse([]byte("endpoint: https://x\nmodels: [a]\nstream: true\nidle_timeout: 10m\n"))
+	if err != nil || !cfg.Stream || cfg.IdleTimeout != 10*time.Minute {
+		t.Fatalf("cfg = %+v, err = %v", cfg, err)
+	}
+	def, _ := parse([]byte("endpoint: https://x\nmodels: [a]\n"))
+	if def.Stream {
+		t.Error("stream default = true, want false")
+	}
+	if _, err := parse([]byte("endpoint: https://x\nmodels: [a]\nidle_timeout: nope\n")); err == nil {
+		t.Error("bad idle_timeout accepted")
 	}
 }

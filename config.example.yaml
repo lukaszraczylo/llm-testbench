@@ -5,7 +5,19 @@ models:
   - uni/qwen3.6-27b
   - uni/btl-4
 concurrency: 8         # default when omitted; matches internal/config's default
-request_timeout: 900s  # default when omitted
-max_tokens_default: 12000  # default when omitted; a reasoning model can spend
+request_timeout: 900s  # default when omitted is 300s
+max_tokens_default: 40000  # default when omitted; a reasoning model can spend
                             # thousands of tokens on reasoning_content before
                             # writing an answer, so this must stay generous
+max_retries: 2         # retries per request after the first try (default 2; 0 disables).
+                       # Raise for flaky gateways: backoff is exponential and
+                       # honors Retry-After.
+# seed: 1234           # optional; sent with every request for backends that honor it
+# Slow local models: give them their own timeout and queue depth.
+# retry_timeouts: false     # default true; false stops a timed-out call re-running a full slow generation
+# model_timeouts:           # overrides request_timeout per model
+#   local/big-model: 45m
+# model_concurrency:        # caps in-flight calls per model (global concurrency still applies)
+#   local/big-model: 1
+# stream: false             # true = SSE; detects a hung server after idle_timeout instead of the full request timeout
+# idle_timeout: 5m          # max silence in a stream (must exceed prompt-processing time); default 5m

@@ -7,22 +7,46 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
-// maxRetries is the number of retry attempts after the initial request on
-// transport errors or 5xx responses, per PLAN.md ("retry w/ backoff x2").
+// maxRetries is the default number of retry attempts after the initial
+// request on transient failures, per PLAN.md ("retry w/ backoff x2").
 const maxRetries = 2
 
-// retryBaseDelay is the base backoff delay; attempt N waits N*retryBaseDelay.
+// retryBaseDelay is the base backoff delay; attempt N waits
+// retryBaseDelay*2^(N-1), capped at maxRetryDelay, plus jitter.
 const retryBaseDelay = 250 * time.Millisecond
+
+// maxRetryDelay caps both the exponential backoff and a server-sent
+// Retry-After so one bad gateway cannot stall a worker for minutes.
+const maxRetryDelay = 30 * time.Second
+
+// maxResponseBytes bounds how much of a response body is read; a runaway
+// or hostile upstream must not exhaust memory.
+const maxResponseBytes = 32 << 20
+
+// jitterFraction is the share of the backoff delay added as random jitter,
+// so concurrent workers retrying one saturated gateway do not stampede it
+// in lockstep.
+const jitterFraction = 0.25
 
 // OpenAIClient talks to an OpenAI-compatible /v1/chat/completions endpoint.
 type OpenAIClient struct {
-	httpClient *http.Client
-	endpoint   string
-	apiKey     string
+	httpClient      *http.Client
+	modelTimeouts   map[string]time.Duration
+	endpoint        string
+	apiKey          string
+	retries         int
+	baseDelay       time.Duration
+	timeout         time.Duration
+	noRetryTimeouts bool
+	stream          bool
+	idleTimeout     time.Duration
 }
 
 // NewOpenAIClient builds a client against endpoint (e.g.
@@ -30,21 +54,83 @@ type OpenAIClient struct {
 // per-request timeout.
 func NewOpenAIClient(endpoint, apiKey string, timeout time.Duration) *OpenAIClient {
 	return &OpenAIClient{
-		endpoint: endpoint,
-		apiKey:   apiKey,
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		endpoint:  strings.TrimRight(endpoint, "/"),
+		apiKey:    apiKey,
+		retries:   maxRetries,
+		baseDelay: retryBaseDelay,
+		timeout:   timeout,
+		// The per-attempt deadline is applied through the context so it can
+		// differ per model; the client itself has no overall timeout.
+		httpClient: &http.Client{},
 	}
 }
 
+// WithModelTimeouts sets per-model request timeouts that override the
+// default; a slow local model can be given far longer than a hosted one.
+func (c *OpenAIClient) WithModelTimeouts(m map[string]time.Duration) *OpenAIClient {
+	c.modelTimeouts = m
+	return c
+}
+
+// WithRetryTimeouts controls whether an attempt that hit its timeout is
+// retried. Retrying re-runs a full slow generation, so for slow models
+// disabling it avoids multiplying the wait by the attempt count.
+func (c *OpenAIClient) WithRetryTimeouts(retry bool) *OpenAIClient {
+	c.noRetryTimeouts = !retry
+	return c
+}
+
+// WithStreaming makes the client request SSE streams. The per-request
+// timeout stays a hard ceiling; idle (default 5m when zero) is how long the
+// stream may go silent before the attempt is abandoned, so a hung server is
+// detected early while a slow-but-progressing generation is left to finish.
+func (c *OpenAIClient) WithStreaming(enabled bool, idle time.Duration) *OpenAIClient {
+	c.stream = enabled
+	c.idleTimeout = idle
+	if enabled && idle <= 0 {
+		c.idleTimeout = defaultIdleTimeout
+	}
+	return c
+}
+
+func (c *OpenAIClient) timeoutFor(model string) time.Duration {
+	if d, ok := c.modelTimeouts[model]; ok && d > 0 {
+		return d
+	}
+	return c.timeout
+}
+
+// WithRetries sets the number of retry attempts after the initial request
+// (0 disables retrying) and returns the client.
+func (c *OpenAIClient) WithRetries(n int) *OpenAIClient {
+	c.retries = max(n, 0)
+	return c
+}
+
+// backoff returns the wait before retry number attempt (1-based): the
+// server's Retry-After when it sent one, else exponential with jitter.
+func (c *OpenAIClient) backoff(attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		return min(retryAfter, maxRetryDelay)
+	}
+	d := min(c.baseDelay<<(attempt-1), maxRetryDelay)
+	return d + time.Duration(rand.Float64()*jitterFraction*float64(d)) //nolint:gosec // jitter needs no cryptographic randomness
+}
+
 type chatCompletionRequest struct {
-	Model       string    `json:"model"`
-	ToolChoice  string    `json:"tool_choice,omitempty"`
-	Messages    []chatMsg `json:"messages"`
-	Tools       []apiTool `json:"tools,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Temperature float64   `json:"temperature"`
+	Seed          *int           `json:"seed,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Model         string         `json:"model"`
+	ToolChoice    string         `json:"tool_choice,omitempty"`
+	Messages      []chatMsg      `json:"messages"`
+	Tools         []apiTool      `json:"tools,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Temperature   float64        `json:"temperature"`
+	Stream        bool           `json:"stream,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatMsg struct {
@@ -102,7 +188,9 @@ type chatCompletionResponse struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
-	Choices []struct {
+	Model             string `json:"model"`
+	SystemFingerprint string `json:"system_fingerprint"`
+	Choices           []struct {
 		FinishReason string      `json:"finish_reason"`
 		Message      responseMsg `json:"message"`
 	} `json:"choices"`
@@ -145,6 +233,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 		Model:       req.Model,
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
+		Seed:        req.Seed,
 	}
 	for _, m := range req.Messages {
 		body.Messages = append(body.Messages, chatMsg(m))
@@ -161,15 +250,21 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 		}
 	}
 
+	if c.stream {
+		body.Stream = true
+		body.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
+
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return Response{}, fmt.Errorf("llm: marshal request: %w", err)
 	}
 
 	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	var retryAfter time.Duration
+	for attempt := 0; attempt <= c.retries; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(attempt) * retryBaseDelay
+			delay := c.backoff(attempt, retryAfter)
 			select {
 			case <-ctx.Done():
 				return Response{}, ctx.Err()
@@ -181,16 +276,32 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 		// reflects the successful attempt's own generation time, not the
 		// cumulative wait across earlier failed/retried attempts (S8).
 		attemptStart := time.Now()
-		resp, err := c.doRequest(ctx, payload)
+		attemptCtx, cancel := context.WithTimeout(ctx, c.timeoutFor(req.Model))
+		resp, err := c.doRequest(attemptCtx, payload)
+		timedOut := (attemptCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil) || errors.Is(err, errIdleTimeout)
+		cancel()
+		retryAfter = 0
 		if err != nil {
 			lastErr = err
-			if isRetryable(err) {
+			if timedOut && c.noRetryTimeouts {
+				return Response{}, fmt.Errorf("llm: timed out after %s (not retried): %w", c.timeoutFor(req.Model), err)
+			}
+			var re *retryableError
+			if errors.As(err, &re) {
+				retryAfter = re.retryAfter
 				continue
 			}
 			return Response{}, err
 		}
 
 		latency := time.Since(attemptStart)
+		if resp.Error == nil && len(resp.Choices) == 0 {
+			// A 2xx with neither choices nor an error object is a gateway
+			// glitch, not an answer; scoring it would record a spurious
+			// wrong response.
+			lastErr = errors.New("llm: response contained no choices")
+			continue
+		}
 		var text, finishReason string
 		var toolCalls []ToolCall
 		if len(resp.Choices) > 0 {
@@ -213,14 +324,17 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request) (Response, err
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			Latency:          latency,
+			Fingerprint:      resp.SystemFingerprint,
+			ServedModel:      resp.Model,
 		}, nil
 	}
-	return Response{}, fmt.Errorf("llm: request failed after %d attempts: %w", maxRetries+1, lastErr)
+	return Response{}, fmt.Errorf("llm: request failed after %d attempts: %w", c.retries+1, lastErr)
 }
 
 type retryableError struct {
-	err    error
-	status int
+	err        error
+	status     int
+	retryAfter time.Duration
 }
 
 func (e *retryableError) Error() string {
@@ -232,18 +346,42 @@ func (e *retryableError) Error() string {
 
 func (e *retryableError) Unwrap() error { return e.err }
 
-func isRetryable(err error) bool {
-	var re *retryableError
-	return errors.As(err, &re)
+// parseRetryAfter reads a delta-seconds Retry-After header; HTTP-date form
+// and malformed values yield 0 (fall back to computed backoff).
+func parseRetryAfter(h string) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(h))
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func (c *OpenAIClient) doRequest(ctx context.Context, payload []byte) (*chatCompletionResponse, error) {
+	var watchdog *idleWatchdog
+	if c.stream {
+		var cancel context.CancelCauseFunc
+		ctx, cancel = context.WithCancelCause(ctx)
+		defer cancel(nil)
+		watchdog = startIdleWatchdog(cancel, c.idleTimeout)
+		defer watchdog.Stop()
+	}
+	out, err := c.send(ctx, payload, watchdog)
+	if err != nil && c.stream && errors.Is(context.Cause(ctx), errIdleTimeout) {
+		return nil, &retryableError{err: fmt.Errorf("no data for %s: %w", c.idleTimeout, errIdleTimeout)}
+	}
+	return out, err
+}
+
+func (c *OpenAIClient) send(ctx context.Context, payload []byte, watchdog *idleWatchdog) (*chatCompletionResponse, error) {
 	url := c.endpoint + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("llm: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
 	if c.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
@@ -253,16 +391,29 @@ func (c *OpenAIClient) doRequest(ctx context.Context, payload []byte) (*chatComp
 		return nil, &retryableError{err: err}
 	}
 	defer func() { _ = httpResp.Body.Close() }() // best-effort; body already fully read below
-
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, &retryableError{err: fmt.Errorf("read body: %w", err)}
+	if watchdog != nil {
+		watchdog.Touch()
 	}
 
-	// 429 is as transient as a 5xx for a self-hosted gateway (rate limit or
-	// a briefly saturated upstream); retry it with the same backoff budget.
-	if httpResp.StatusCode >= 500 || httpResp.StatusCode == http.StatusTooManyRequests {
-		return nil, &retryableError{status: httpResp.StatusCode}
+	// 429 and 408 are as transient as a 5xx for a self-hosted gateway (rate
+	// limit, briefly saturated upstream, slow proxy); retry them with the
+	// same backoff budget.
+	if httpResp.StatusCode >= 500 || httpResp.StatusCode == http.StatusTooManyRequests || httpResp.StatusCode == http.StatusRequestTimeout {
+		return nil, &retryableError{
+			status:     httpResp.StatusCode,
+			retryAfter: parseRetryAfter(httpResp.Header.Get("Retry-After")),
+		}
+	}
+
+	// A gateway may answer a streaming request with a plain JSON body (an
+	// error, or no streaming support); only parse SSE when it sent SSE.
+	if c.stream && httpResp.StatusCode < 400 && strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream") {
+		return readStream(httpResp.Body, watchdog.Touch)
+	}
+
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, maxResponseBytes))
+	if err != nil {
+		return nil, &retryableError{err: fmt.Errorf("read body: %w", err)}
 	}
 	if httpResp.StatusCode >= 400 {
 		return nil, fmt.Errorf("llm: server returned status %d: %s", httpResp.StatusCode, string(respBody))

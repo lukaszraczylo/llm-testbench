@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/runner"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
@@ -22,6 +23,7 @@ type jsonResult struct {
 	Error            string  `json:"error,omitempty"`
 	ResponseText     string  `json:"response_text"`
 	FinishReason     string  `json:"finish_reason,omitempty"`
+	Fingerprint      string  `json:"fingerprint,omitempty"`
 	Score            float64 `json:"score"`
 	LatencyMS        int64   `json:"latency_ms"`
 	PromptTokens     int     `json:"prompt_tokens"`
@@ -36,6 +38,7 @@ type jsonResult struct {
 // plus the per-test discrimination rollup, so downstream tooling
 // (compare) can re-derive stability without re-running the suite.
 type jsonArtifact struct {
+	Meta    *RunMeta      `json:"meta,omitempty"`
 	Results []jsonResult  `json:"results"`
 	Stats   []jsonStatRow `json:"stats,omitempty"`
 }
@@ -77,6 +80,7 @@ func buildArtifact(tests []testkit.Test, models []string, results []runner.Resul
 			Detail:           r.Score.Detail,
 			ResponseText:     r.ResponseText,
 			FinishReason:     r.FinishReason,
+			Fingerprint:      r.Fingerprint,
 			Skipped:          r.Score.Skipped,
 			Truncated:        r.Truncated(),
 			LatencyMS:        r.Latency.Milliseconds(),
@@ -150,12 +154,37 @@ func LoadArtifact(path string) (jsonArtifact, error) {
 	return jsonArtifact{Results: legacy}, nil
 }
 
-// WriteArtifact saves the run as a JSON artifact at path, for later
-// `llmtest compare` runs, regardless of the stdout report format.
-func WriteArtifact(path string, tests []testkit.Test, models []string, results []runner.Result) error {
-	b, err := json.MarshalIndent(buildArtifact(tests, models, results), "", "  ")
+// WriteArtifact saves the run, stamped with meta, as a JSON artifact at
+// path for later `llmtest compare` runs, regardless of the stdout report
+// format. The write is atomic (temp file + rename), so an interrupted
+// process never leaves a truncated artifact that replaced a good one.
+func WriteArtifact(path string, meta RunMeta, tests []testkit.Test, models []string, results []runner.Result) error {
+	art := buildArtifact(tests, models, results)
+	meta.CatalogHash = CatalogHash(tests)
+	meta.TestCount = len(tests)
+	meta.Fingerprints = servedFingerprints(results)
+	art.Meta = &meta
+
+	b, err := json.MarshalIndent(art, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644) //nolint:gosec // 0o644: the artifact is a report meant to be shared/committed, not a secret file
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".llmtest-artifact-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }() // no-op after a successful rename
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// 0o644: the artifact is a report meant to be shared/committed, not a secret file.
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil { //nolint:gosec // see comment above
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }

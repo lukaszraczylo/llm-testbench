@@ -75,6 +75,8 @@ Both `list` and `run` accept:
   `60s`).
 - `--out FILE` - write the run as a JSON artifact (raw per-attempt results
   plus the per-test discrimination rollup) for later `llmtest compare`.
+- `--seed N` - send `seed: N` with every request (overrides the config's
+  `seed`). Whether the backend honors it is backend-specific.
 - `--quiet` - suppress progress output on stderr. Progress is on by
   default: a run can issue hundreds of requests at 30-50s each, and a
   silent CLI reads as a hang.

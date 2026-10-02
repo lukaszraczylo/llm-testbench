@@ -21,6 +21,12 @@ func newTestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	return srv
 }
 
+func writeOK(w http.ResponseWriter, content string) {
+	resp := chatCompletionResponse{}
+	resp.Choices = append(resp.Choices, testChoice(content, "stop"))
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // testChoice builds one response choice with a non-null content string, the
 // common case. Its return type is exactly chatCompletionResponse.Choices's
 // element type, so callers can append() it without repeating the anonymous
@@ -137,7 +143,7 @@ func TestOpenAIClient_Complete_SendsTemperatureZero(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read request body: %v", err)
 		}
-		_ = json.NewEncoder(w).Encode(chatCompletionResponse{})
+		writeOK(w, "ok")
 	})
 
 	client := NewOpenAIClient(srv.URL, "", time.Second)
@@ -320,7 +326,7 @@ func TestOpenAIClient_Complete_SendsAPIKey(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer secret-key" {
 			t.Errorf("Authorization = %q, want Bearer secret-key", got)
 		}
-		_ = json.NewEncoder(w).Encode(chatCompletionResponse{})
+		writeOK(w, "ok")
 	})
 
 	client := NewOpenAIClient(srv.URL, "secret-key", time.Second)
@@ -392,5 +398,210 @@ func TestOpenAIClient_Complete_MalformedToolArgs(t *testing.T) {
 	}
 	if resp.ToolCalls[0].RawArguments != "{not valid json" {
 		t.Errorf("raw args = %q", resp.ToolCalls[0].RawArguments)
+	}
+}
+
+func fastClient(url string) *OpenAIClient {
+	c := NewOpenAIClient(url, "", time.Second)
+	c.baseDelay = time.Millisecond
+	return c
+}
+
+var oneMsg = Request{Model: "m", Messages: []Message{{Role: "user", Content: "x"}}}
+
+func TestOpenAIClient_Complete_SendsSeedAndEchoesFingerprint(t *testing.T) {
+	var decoded map[string]any
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &decoded)
+		_, _ = w.Write([]byte(`{"model":"served-1","system_fingerprint":"fp-9","choices":[{"finish_reason":"stop","message":{"content":"hi"}}]}`))
+	})
+	seed := 42
+	req := oneMsg
+	req.Seed = &seed
+	resp, err := fastClient(srv.URL).Complete(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if decoded["seed"] != float64(42) {
+		t.Errorf("seed = %v, want 42", decoded["seed"])
+	}
+	if resp.Fingerprint != "fp-9" || resp.ServedModel != "served-1" {
+		t.Errorf("fingerprint/model = %q/%q, want fp-9/served-1", resp.Fingerprint, resp.ServedModel)
+	}
+}
+
+func TestOpenAIClient_Complete_OmitsSeedWhenUnset(t *testing.T) {
+	var decoded map[string]any
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &decoded)
+		writeOK(w, "ok")
+	})
+	if _, err := fastClient(srv.URL).Complete(context.Background(), oneMsg); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if _, present := decoded["seed"]; present {
+		t.Errorf("seed present in body without Request.Seed: %v", decoded)
+	}
+}
+
+func TestOpenAIClient_Complete_RetriesEmptyChoicesThenSucceeds(t *testing.T) {
+	var calls int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			_, _ = w.Write([]byte(`{"choices":[]}`))
+			return
+		}
+		writeOK(w, "ok")
+	})
+	resp, err := fastClient(srv.URL).Complete(context.Background(), oneMsg)
+	if err != nil || resp.Text != "ok" {
+		t.Fatalf("Complete() = %q, %v; want ok, nil", resp.Text, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("calls = %d, want 2", got)
+	}
+}
+
+func TestOpenAIClient_Complete_RetriesOn408(t *testing.T) {
+	var calls int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusRequestTimeout)
+			return
+		}
+		writeOK(w, "ok")
+	})
+	if _, err := fastClient(srv.URL).Complete(context.Background(), oneMsg); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("calls = %d, want 2", got)
+	}
+}
+
+func TestOpenAIClient_WithRetries(t *testing.T) {
+	var calls int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	if _, err := fastClient(srv.URL).WithRetries(5).Complete(context.Background(), oneMsg); err == nil {
+		t.Fatal("Complete() error = nil, want error")
+	}
+	if got := atomic.LoadInt32(&calls); got != 6 {
+		t.Errorf("calls = %d, want 6 (1 + 5 retries)", got)
+	}
+
+	atomic.StoreInt32(&calls, 0)
+	if _, err := fastClient(srv.URL).WithRetries(0).Complete(context.Background(), oneMsg); err == nil {
+		t.Fatal("Complete() error = nil, want error")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("calls = %d, want 1 (retries disabled)", got)
+	}
+}
+
+func TestOpenAIClient_Complete_HonorsRetryAfter(t *testing.T) {
+	var calls int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		writeOK(w, "ok")
+	})
+	start := time.Now()
+	if _, err := fastClient(srv.URL).Complete(context.Background(), oneMsg); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+		t.Errorf("elapsed = %v, want >= ~1s from Retry-After", elapsed)
+	}
+}
+
+func TestOpenAIClient_backoff(t *testing.T) {
+	c := NewOpenAIClient("http://x", "", time.Second)
+	for attempt, base := range map[int]time.Duration{1: 250 * time.Millisecond, 2: 500 * time.Millisecond, 3: time.Second} {
+		got := c.backoff(attempt, 0)
+		if got < base || got > base+base/3 {
+			t.Errorf("backoff(%d) = %v, want in [%v, %v]", attempt, got, base, base+base/3)
+		}
+	}
+	if got := c.backoff(30, 0); got > maxRetryDelay*5/4 {
+		t.Errorf("backoff(30) = %v, want capped near %v", got, maxRetryDelay)
+	}
+	if got := c.backoff(1, time.Hour); got != maxRetryDelay {
+		t.Errorf("backoff with huge Retry-After = %v, want cap %v", got, maxRetryDelay)
+	}
+}
+
+func TestNewOpenAIClient_TrimsTrailingSlash(t *testing.T) {
+	var path string
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		writeOK(w, "ok")
+	})
+	if _, err := fastClient(srv.URL+"/v1/").Complete(context.Background(), oneMsg); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if path != "/v1/chat/completions" {
+		t.Errorf("path = %q, want /v1/chat/completions", path)
+	}
+}
+
+func TestOpenAIClient_Complete_TimeoutNotRetriedWhenDisabled(t *testing.T) {
+	var calls int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		time.Sleep(300 * time.Millisecond)
+		writeOK(w, "late")
+	})
+	c := NewOpenAIClient(srv.URL, "", 50*time.Millisecond).WithRetryTimeouts(false)
+	c.baseDelay = time.Millisecond
+	_, err := c.Complete(context.Background(), oneMsg)
+	if err == nil || !strings.Contains(err.Error(), "not retried") {
+		t.Fatalf("err = %v, want a timeout not retried", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("calls = %d, want 1", got)
+	}
+}
+
+func TestOpenAIClient_Complete_TimeoutRetriedByDefault(t *testing.T) {
+	var calls int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			time.Sleep(300 * time.Millisecond)
+		}
+		writeOK(w, "ok")
+	})
+	c := NewOpenAIClient(srv.URL, "", 100*time.Millisecond)
+	c.baseDelay = time.Millisecond
+	if _, err := c.Complete(context.Background(), oneMsg); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("calls = %d, want 2", got)
+	}
+}
+
+func TestOpenAIClient_Complete_PerModelTimeout(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		writeOK(w, "slow but fine")
+	})
+	c := NewOpenAIClient(srv.URL, "", 50*time.Millisecond).
+		WithRetryTimeouts(false).
+		WithModelTimeouts(map[string]time.Duration{"slow-local": 2 * time.Second})
+	req := oneMsg
+	req.Model = "slow-local"
+	if resp, err := c.Complete(context.Background(), req); err != nil || resp.Text != "slow but fine" {
+		t.Fatalf("slow-local = %q, %v; want success under its own timeout", resp.Text, err)
+	}
+	if _, err := c.Complete(context.Background(), oneMsg); err == nil {
+		t.Error("default-timeout model succeeded, want timeout")
 	}
 }

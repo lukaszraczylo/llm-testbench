@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/lukaszraczylo/llm-testbench/internal/eval"
 	"github.com/lukaszraczylo/llm-testbench/internal/report"
+	"github.com/lukaszraczylo/llm-testbench/internal/runner"
 	"github.com/lukaszraczylo/llm-testbench/internal/testkit"
 )
 
@@ -99,5 +103,24 @@ func TestHealthCommand_RequiresArtifacts(t *testing.T) {
 	if err := healthCommand([]string{"/nonexistent-artifact.json"}); err == nil ||
 		!strings.Contains(err.Error(), "load /nonexistent-artifact.json") {
 		t.Errorf("healthCommand(missing file) error = %v, want load error naming the file", err)
+	}
+}
+
+func TestDedupe(t *testing.T) {
+	got := dedupe([]string{"a", "b", "a", "c", "b"})
+	if strings.Join(got, ",") != "a,b,c" {
+		t.Errorf("dedupe = %v, want [a b c]", got)
+	}
+}
+
+func TestDropCancelled(t *testing.T) {
+	in := []runner.Result{
+		{TestID: "ok"},
+		{TestID: "cancelled", Err: fmt.Errorf("wrapped: %w", context.Canceled)},
+		{TestID: "real-error", Err: errors.New("boom")},
+	}
+	got := dropCancelled(in)
+	if len(got) != 2 || got[0].TestID != "ok" || got[1].TestID != "real-error" {
+		t.Errorf("dropCancelled = %+v, want ok and real-error kept", got)
 	}
 }
