@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -39,8 +40,71 @@ func stripLeadingPackageClause(code string) string {
 	return code
 }
 
-// execTimeout bounds every compile/run step of the exec evaluators.
-const execTimeout = 30 * time.Second
+// execTimeout bounds every run step (and the C compile) of the exec
+// evaluators; goBuildTimeout is the longer allowance for a cold `go build`.
+const (
+	execTimeout    = 30 * time.Second
+	goBuildTimeout = 120 * time.Second
+)
+
+// execWaitDelay bounds how long Wait lingers for output pipes after the
+// process is killed; without it a grandchild holding stdout open hangs the
+// whole run past execTimeout.
+const execWaitDelay = 2 * time.Second
+
+// maxExecOutput caps captured stdout/stderr per call, so a runaway print
+// loop cannot exhaust memory before the timeout fires.
+const maxExecOutput = 1 << 20
+
+// execSlots limits concurrent compile/run subprocesses. The runner issues up
+// to Concurrency scoring calls at once; unbounded, CPU starvation pushes
+// correct solutions past execTimeout and turns load into false zeros.
+var execSlots = make(chan struct{}, max(2, runtime.NumCPU()/2))
+
+// cappedBuffer keeps the first maxExecOutput bytes written and discards the
+// rest, still reporting full writes so the child never sees a broken pipe.
+type cappedBuffer struct{ buf bytes.Buffer }
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := maxExecOutput - c.buf.Len(); room > 0 {
+		c.buf.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) String() string { return c.buf.String() }
+
+// runBounded runs name with args in dir under env, holding an exec slot,
+// with a hard timeout and capped output. A timeout is reported as such
+// rather than as a bare "signal: killed".
+func runBounded(ctx context.Context, timeout time.Duration, dir string, env []string, name string, args ...string) (stdout, stderr string, err error) {
+	select {
+	case execSlots <- struct{}{}:
+		defer func() { <-execSlots }()
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// #nosec G204 -- running model-generated code under an isolated temp dir
+	// and a minimal env allowlist is this package's purpose; name is always
+	// a fixed toolchain binary or one this package just compiled. See the
+	// README "Requirements" warning (S13).
+	cmd := exec.CommandContext(runCtx, name, args...) //nolint:gosec // see comment above
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.WaitDelay = execWaitDelay
+	var out, errOut cappedBuffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err = cmd.Run()
+	if err != nil && runCtx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("timed out after %s: %w", timeout, err)
+	}
+	return out.String(), errOut.String(), err
+}
 
 // CodePlaceholder marks where the extracted response code is substituted
 // into a harness template.
@@ -93,10 +157,19 @@ func minimalExecEnv(homeDir string) []string {
 		goModCacheDir = goEnvValue("GOMODCACHE")
 	})
 
+	// Pinned so output does not vary with the operator's shell: timezone,
+	// hash seeding and locale-dependent encoding. GOTOOLCHAIN=local stops
+	// `go` fetching a different toolchain over the network mid-run.
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + homeDir,
 		"TMPDIR=" + homeDir,
+		"TZ=UTC",
+		"PYTHONHASHSEED=0",
+		"PYTHONUTF8=1",
+		"PYTHONDONTWRITEBYTECODE=1",
+		"GOTOOLCHAIN=local",
+		"GOFLAGS=-buildvcs=false",
 	}
 	if goCacheDir != "" {
 		env = append(env, "GOCACHE="+goCacheDir)
@@ -199,18 +272,16 @@ func (g goRunEval) Evaluate(ctx context.Context, response string) Score {
 		return Score{Value: 0, Detail: fmt.Sprintf("write go.mod: %v", modErr)}
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, execTimeout)
-	defer cancel()
+	// Build and run as separate steps so a cold compile under load is not
+	// charged against the run timeout.
+	env := minimalExecEnv(root)
+	binPath := filepath.Join(work, "prog")
+	if _, buildStderr, buildErr := runBounded(ctx, goBuildTimeout, work, env, "go", "build", "-o", binPath, "."); buildErr != nil {
+		return Score{Value: 0, Detail: fmt.Sprintf("go build failed: %v; stderr: %s", buildErr, strings.TrimSpace(buildStderr))}
+	}
+	stdout, stderr, err := runBounded(ctx, execTimeout, work, env, binPath)
 
-	cmd := exec.CommandContext(runCtx, "go", "run", ".")
-	cmd.Dir = work
-	cmd.Env = minimalExecEnv(root)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-
-	return compareStdout(stdout.String(), g.want, err, stderr.String())
+	return compareStdout(stdout, g.want, err, stderr)
 }
 
 // pyRunEval runs a Python program built from a harness template plus the
@@ -247,22 +318,9 @@ func (p pyRunEval) Evaluate(ctx context.Context, response string) Score {
 		return Score{Value: 0, Detail: fmt.Sprintf("write script.py: %v", writeErr)}
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, execTimeout)
-	defer cancel()
+	stdout, stderr, err := runBounded(ctx, execTimeout, work, minimalExecEnv(root), "python3", scriptPath)
 
-	// #nosec G204 -- this is the eval package's whole purpose: compile/run
-	// model-generated code under an isolated temp dir and a minimal env
-	// allowlist (minimalExecEnv). See README's "Requirements" section for
-	// the corresponding operator-facing warning (S13).
-	cmd := exec.CommandContext(runCtx, "python3", scriptPath) //nolint:gosec // see comment above
-	cmd.Dir = work
-	cmd.Env = minimalExecEnv(root)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-
-	return compareStdout(stdout.String(), p.want, err, stderr.String())
+	return compareStdout(stdout, p.want, err, stderr)
 }
 
 // cRunEval compiles/runs a C program built from a harness template plus the
@@ -300,32 +358,12 @@ func (c cRunEval) Evaluate(ctx context.Context, response string) Score {
 	}
 	binPath := filepath.Join(work, "prog")
 
-	buildCtx, buildCancel := context.WithTimeout(ctx, execTimeout)
-	defer buildCancel()
-	// #nosec G204 -- compiling model-generated C source under an isolated
-	// temp dir and a minimal env allowlist is this evaluator's job; see the
-	// PyRun comment above and README's "Requirements" warning (S13).
-	buildCmd := exec.CommandContext(buildCtx, "cc", "-o", binPath, srcPath) //nolint:gosec // see comment above
-	buildCmd.Dir = work
-	buildCmd.Env = minimalExecEnv(root)
-	var buildStderr bytes.Buffer
-	buildCmd.Stderr = &buildStderr
-	if buildErr := buildCmd.Run(); buildErr != nil {
-		return Score{Value: 0, Detail: fmt.Sprintf("cc failed: %v; stderr: %s", buildErr, strings.TrimSpace(buildStderr.String()))}
+	env := minimalExecEnv(root)
+	if _, buildStderr, buildErr := runBounded(ctx, execTimeout, work, env, "cc", "-o", binPath, srcPath); buildErr != nil {
+		return Score{Value: 0, Detail: fmt.Sprintf("cc failed: %v; stderr: %s", buildErr, strings.TrimSpace(buildStderr))}
 	}
 
-	runCtx, runCancel := context.WithTimeout(ctx, execTimeout)
-	defer runCancel()
-	// #nosec G204 -- binPath is the binary this same call just compiled,
-	// into a fresh, isolated temp dir this evaluator created; not an
-	// externally supplied executable path.
-	runCmd := exec.CommandContext(runCtx, binPath) //nolint:gosec // see comment above
-	runCmd.Dir = work
-	runCmd.Env = minimalExecEnv(root)
-	var stdout, stderr bytes.Buffer
-	runCmd.Stdout = &stdout
-	runCmd.Stderr = &stderr
-	err = runCmd.Run()
+	stdout, stderr, err := runBounded(ctx, execTimeout, work, env, binPath)
 
-	return compareStdout(stdout.String(), c.want, err, stderr.String())
+	return compareStdout(stdout, c.want, err, stderr)
 }

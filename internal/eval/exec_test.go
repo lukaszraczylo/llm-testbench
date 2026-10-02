@@ -3,7 +3,9 @@ package eval
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
+	"time"
 )
 
 func requireToolchain(t *testing.T, name string) {
@@ -182,5 +184,48 @@ func TestExecEvaluators_ToolchainMissingSkipsNotFails(t *testing.T) {
 	cScore := CRun(cHarness, "21").Evaluate(context.Background(), "```c\nint triple(int n){return n*3;}\n```")
 	if !cScore.Skipped {
 		t.Errorf("CRun with empty PATH: Skipped = false, want true (%+v)", cScore)
+	}
+}
+
+func TestRunBounded_TimeoutIsReported(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep not available")
+	}
+	_, _, err := runBounded(context.Background(), 100*time.Millisecond, t.TempDir(), nil, "sleep", "5")
+	if err == nil || !strings.Contains(err.Error(), "timed out after") {
+		t.Errorf("err = %v, want a timed out error", err)
+	}
+}
+
+func TestRunBounded_OutputIsCapped(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	stdout, _, err := runBounded(context.Background(), 10*time.Second, t.TempDir(), nil, "sh", "-c", "yes | head -c 5000000")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(stdout) != maxExecOutput {
+		t.Errorf("captured %d bytes, want cap %d", len(stdout), maxExecOutput)
+	}
+}
+
+func TestRunBounded_GrandchildHoldingPipeDoesNotHang(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	start := time.Now()
+	_, _, _ = runBounded(context.Background(), 200*time.Millisecond, t.TempDir(), nil, "sh", "-c", "sleep 30 & sleep 30")
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("took %v, want return shortly after timeout + WaitDelay", elapsed)
+	}
+}
+
+func TestMinimalExecEnv_PinsDeterminismVars(t *testing.T) {
+	env := strings.Join(minimalExecEnv(t.TempDir()), "\n")
+	for _, want := range []string{"TZ=UTC", "PYTHONHASHSEED=0", "GOTOOLCHAIN=local"} {
+		if !strings.Contains(env, want) {
+			t.Errorf("env missing %s", want)
+		}
 	}
 }
